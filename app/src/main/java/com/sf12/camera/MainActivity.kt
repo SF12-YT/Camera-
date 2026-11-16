@@ -29,11 +29,13 @@ import android.provider.MediaStore
 import android.util.Range
 import android.util.Size
 import android.view.Gravity
+import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -53,16 +55,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var bottomPanel: LinearLayout
     private lateinit var quickControls: LinearLayout
     private lateinit var zoomRow: LinearLayout
+    private lateinit var modeScroll: HorizontalScrollView
     private lateinit var modeRow: LinearLayout
     private lateinit var shutterRow: LinearLayout
+    private lateinit var statusHint: TextView
 
+    private lateinit var settingsButton: TextView
     private lateinit var flashButton: TextView
     private lateinit var aspectButton: TextView
     private lateinit var timerButton: TextView
     private lateinit var galleryThumbnail: ImageView
     private lateinit var shutterButton: FrameLayout
-    private lateinit var tabLabels: Map<String, TextView>
-    private lateinit var tabIndicators: Map<String, View>
+    private lateinit var modeLabels: Map<String, TextView>
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
 
     private val cameraManager by lazy { getSystemService(Context.CAMERA_SERVICE) as CameraManager }
     private var cameraDevice: CameraDevice? = null
@@ -105,6 +110,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
 
+        activeTab = getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .getString("camera_profile", "Basic") ?: "Basic"
+        if (activeTab !in listOf("Basic", "Pro", "Advanced", "Astrophotography")) {
+            activeTab = "Basic"
+        }
         buildCameraUi()
     }
 
@@ -173,9 +183,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
 
         topPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), 0)
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(10), dp(18), 0)
         }
+        settingsButton = TextView(this).apply {
+            text = "⚙"
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            contentDescription = "Camera settings"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showSettings() }
+        }
+        topPanel.addView(settingsButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+
+        quickControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        flashButton = quickControl("⚡") { cycleFlash() }
+        timerButton = quickControl("◷") { cycleTimer() }
+        aspectButton = quickControl("3:4") { showAspectRatioPicker() }
+        quickControls.addView(flashButton, weightedControl())
+        quickControls.addView(timerButton, weightedControl())
+        quickControls.addView(aspectButton, weightedControl())
+        topPanel.addView(quickControls, LinearLayout.LayoutParams(0, dp(48), 1f))
         root.addView(
             topPanel,
             FrameLayout.LayoutParams(
@@ -185,62 +219,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
 
-        val tabs = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        val labels = mutableMapOf<String, TextView>()
-        val indicators = mutableMapOf<String, View>()
-        listOf("Basic", "Pro", "Advanced").forEach { name ->
-            val item = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(dp(10), dp(8), dp(10), dp(9))
-                isClickable = true
-                isFocusable = true
-            }
-            val label = TextView(this).apply {
-                text = name
-                textSize = 14f
-                gravity = Gravity.CENTER
-                setTypeface(null, android.graphics.Typeface.BOLD)
-            }
-            val indicator = View(this).apply {
-                background = rounded(Color.WHITE, 100)
-            }
-            item.addView(label, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(22)
-            ))
-            val indicatorParams = LinearLayout.LayoutParams(dp(24), dp(3)).apply {
-                topMargin = dp(5)
-            }
-            item.addView(indicator, indicatorParams)
-            item.setOnClickListener { selectTab(name) }
-            tabs.addView(item, LinearLayout.LayoutParams(0, dp(43), 1f))
-            labels[name] = label
-            indicators[name] = indicator
-        }
-        tabLabels = labels
-        tabIndicators = indicators
-        topPanel.addView(tabs, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(43)))
-
-        quickControls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(8))
-        }
-        flashButton = quickControl("⚡  AUTO") { cycleFlash() }
-        aspectButton = quickControl("3:4") { showAspectRatioPicker() }
-        timerButton = quickControl("TIMER  OFF") { cycleTimer() }
-        quickControls.addView(flashButton, weightedControl())
-        quickControls.addView(aspectButton, weightedControl())
-        quickControls.addView(timerButton, weightedControl())
-        topPanel.addView(quickControls)
-
         bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(18), 0, dp(18), dp(25))
+            setPadding(dp(18), 0, dp(18), dp(26))
         }
         root.addView(
             bottomPanel,
@@ -254,108 +236,214 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         zoomRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(12))
+            setPadding(0, 0, 0, dp(10))
         }
-        bottomPanel.addView(zoomRow)
+        bottomPanel.addView(zoomRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(56)
+        ))
 
+        modeScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            fillViewport = true
+        }
         modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(17))
         }
-        listOf("Video", "Portrait", "Photo", "Night").forEach { mode ->
+        val labels = mutableMapOf<String, TextView>()
+        listOf("Portrait", "Photo", "Video", "Night").forEach { mode ->
             val label = TextView(this).apply {
                 text = mode.uppercase(Locale.ROOT)
-                textSize = 11f
+                textSize = 13f
                 gravity = Gravity.CENTER
-                setTypeface(null, if (mode == "Photo") android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                setTextColor(if (mode == "Photo") Color.WHITE else 0xFFB5B5B5.toInt())
-                setPadding(dp(7), dp(7), dp(7), dp(7))
+                setTextColor(0xFFBDBDBD.toInt())
+                setPadding(dp(18), dp(9), dp(18), dp(9))
                 isClickable = true
+                isFocusable = true
                 setOnClickListener { selectMode(mode) }
             }
-            modeRow.addView(label, LinearLayout.LayoutParams(0, dp(34), 1f))
+            modeRow.addView(
+                label,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)
+                ).apply {
+                    marginStart = dp(3)
+                    marginEnd = dp(3)
+                }
+            )
+            labels[mode] = label
         }
-        bottomPanel.addView(modeRow)
+        modeLabels = labels
+        modeScroll.addView(
+            modeRow,
+            HorizontalScrollView.LayoutParams(
+                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
+                HorizontalScrollView.LayoutParams.MATCH_PARENT
+            )
+        )
+        bottomPanel.addView(
+            modeScroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(46)
+            ).apply {
+                bottomMargin = dp(16)
+            }
+        )
 
         shutterRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
 
-        galleryThumbnail = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = rounded(0x55333333, 12)
-            setImageDrawable(textDrawablePlaceholder())
+        val gallerySlot = FrameLayout(this).apply {
             isClickable = true
+            isFocusable = true
+            contentDescription = "Open gallery"
             setOnClickListener { openLastPhoto() }
         }
-        shutterRow.addView(galleryThumbnail, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
-            weight = 1f
-            gravity = Gravity.CENTER_VERTICAL
-        })
+        galleryThumbnail = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = oval(0xFF303030.toInt())
+            clipToOutline = true
+            setImageDrawable(textDrawablePlaceholder())
+            isClickable = false
+        }
+        gallerySlot.addView(
+            galleryThumbnail,
+            FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
+        )
+        shutterRow.addView(gallerySlot, LinearLayout.LayoutParams(0, dp(82), 1f))
 
         shutterButton = FrameLayout(this).apply {
             background = ovalStroke(Color.WHITE, dp(3))
             isClickable = true
             isFocusable = true
+            contentDescription = "Take photo"
             setOnClickListener { onShutterPressed() }
         }
-        val shutterInner = View(this).apply {
-            background = oval(Color.WHITE)
-        }
+        val shutterInner = View(this).apply { background = oval(Color.WHITE) }
         shutterButton.addView(
             shutterInner,
             FrameLayout.LayoutParams(dp(58), dp(58), Gravity.CENTER)
         )
-        shutterRow.addView(shutterButton, LinearLayout.LayoutParams(dp(78), dp(78)).apply {
-            gravity = Gravity.CENTER
-        })
+        shutterRow.addView(shutterButton, LinearLayout.LayoutParams(dp(82), dp(82)))
 
-        val switchButton = TextView(this).apply {
-            text = "↻"
-            textSize = 32f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
+        val switchSlot = FrameLayout(this).apply {
+            background = oval(0x55333333)
             isClickable = true
+            isFocusable = true
+            contentDescription = "Switch camera"
             setOnClickListener { switchCamera() }
         }
-        shutterRow.addView(switchButton, LinearLayout.LayoutParams(0, dp(58), 1f))
-        bottomPanel.addView(shutterRow)
-
-        val hint = TextView(this).apply {
-            text = "CAMERA"
-            textSize = 9f
-            letterSpacing = 0.18f
+        val switchIcon = TextView(this).apply {
+            text = "↻"
+            textSize = 31f
             gravity = Gravity.CENTER
-            setTextColor(0x99FFFFFF.toInt())
-            setPadding(0, dp(8), 0, 0)
+            setTextColor(Color.WHITE)
         }
-        bottomPanel.addView(hint)
+        switchSlot.addView(
+            switchIcon,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        shutterRow.addView(switchSlot, LinearLayout.LayoutParams(0, dp(62), 1f))
+        bottomPanel.addView(
+            shutterRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(82)
+            )
+        )
 
-        selectTab("Basic")
+        statusHint = TextView(this).apply {
+            textSize = 10f
+            letterSpacing = 0.08f
+            gravity = Gravity.CENTER
+            setTextColor(0xCCFFFFFF.toInt())
+            setPadding(0, dp(9), 0, 0)
+            visibility = View.GONE
+        }
+        bottomPanel.addView(
+            statusHint,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        scaleGestureDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val bounds = zoomBounds()
+                    val nextZoom = (zoomRatio * detector.scaleFactor)
+                        .coerceIn(bounds.first, bounds.second)
+                    if (abs(nextZoom - zoomRatio) > 0.002f) {
+                        zoomRatio = nextZoom
+                        startPreviewRepeating()
+                    }
+                    return true
+                }
+
+                override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    setZoomButtons()
+                }
+            }
+        )
+        previewView.setOnTouchListener { _, event ->
+            val handled = scaleGestureDetector.onTouchEvent(event)
+            handled || event.pointerCount > 1
+        }
+
+        selectMode("Photo")
         updateFlashButton()
         updateTimerButton()
         setZoomButtons()
+        selectTab(activeTab)
         setContentView(root)
     }
 
     private fun selectTab(name: String) {
+        val profiles = listOf("Basic", "Pro", "Advanced", "Astrophotography")
+        if (name !in profiles) return
+
         activeTab = name
-        tabLabels.forEach { (tab, label) ->
-            label.setTextColor(if (tab == name) Color.WHITE else 0xFF9B9B9B.toInt())
-            tabIndicators[tab]?.visibility = if (tab == name) View.VISIBLE else View.INVISIBLE
-        }
+        getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .edit()
+            .putString("camera_profile", name)
+            .apply()
+
         val basic = name == "Basic"
         quickControls.visibility = if (basic) View.VISIBLE else View.INVISIBLE
         zoomRow.visibility = if (basic) View.VISIBLE else View.INVISIBLE
-        modeRow.visibility = if (basic) View.VISIBLE else View.INVISIBLE
+        modeScroll.visibility = if (basic) View.VISIBLE else View.INVISIBLE
         shutterRow.visibility = if (basic) View.VISIBLE else View.INVISIBLE
-        val hint = bottomPanel.getChildAt(bottomPanel.childCount - 1) as? TextView
-        hint?.text = if (basic) "CAMERA" else "$name MODE  ·  COMING NEXT"
+        statusHint.visibility = if (basic) View.GONE else View.VISIBLE
+        statusHint.text = when (name) {
+            "Pro" -> "PRO CONTROLS · COMING SOON"
+            "Advanced" -> "ADVANCED CONTROLS · COMING SOON"
+            "Astrophotography" -> "ASTROPHOTOGRAPHY · COMING SOON"
+            else -> ""
+        }
+
         if (!basic) {
             Toast.makeText(this, "$name mode is planned for a later build.", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun showSettings() {
+        val profiles = arrayOf("Basic", "Pro", "Advanced", "Astrophotography")
+        AlertDialog.Builder(this)
+            .setTitle("Camera settings")
+            .setSingleChoiceItems(profiles, profiles.indexOf(activeTab)) { dialog, which ->
+                selectTab(profiles[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun selectMode(mode: String) {
@@ -364,26 +452,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         activeMode = mode
+        if (!::modeLabels.isInitialized) return
+        modeLabels.forEach { (label, view) ->
+            val selected = label == mode
+            view.setTextColor(if (selected) Color.WHITE else 0xFFBDBDBD.toInt())
+            view.setTypeface(
+                null,
+                if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+            )
+            view.background = if (selected) rounded(0xFF303030.toInt(), 100) else null
+        }
     }
 
     private fun quickControl(text: String, action: () -> Unit): TextView {
         return TextView(this).apply {
             this.text = text
-            textSize = 11f
+            textSize = if (text == "3:4") 15f else 23f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            setPadding(dp(8), dp(10), dp(8), dp(10))
-            background = rounded(0x55202020, 100, 0x44FFFFFF)
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             isClickable = true
             isFocusable = true
             setOnClickListener { action() }
         }
     }
 
-    private fun weightedControl() = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-        marginStart = dp(4)
-        marginEnd = dp(4)
-    }
+    private fun weightedControl() = LinearLayout.LayoutParams(0, dp(48), 1f)
 
     private fun cycleFlash() {
         val available = cameraCharacteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
@@ -398,8 +492,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun updateFlashButton() {
         if (!::flashButton.isInitialized) return
-        val labels = listOf("⚡  AUTO", "⚡  ON", "⚡  OFF")
-        flashButton.text = labels[flashMode]
+        flashButton.text = "⚡"
+        flashButton.contentDescription = when (flashMode) {
+            0 -> "Flash auto"
+            1 -> "Flash on"
+            else -> "Flash off"
+        }
     }
 
     private fun cycleTimer() {
@@ -413,9 +511,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun updateTimerButton() {
         if (!::timerButton.isInitialized) return
-        timerButton.text = when (timerSeconds) {
-            0 -> "TIMER  OFF"
-            else -> "TIMER  ${timerSeconds}s"
+        timerButton.text = "◷"
+        timerButton.contentDescription = when (timerSeconds) {
+            0 -> "Timer off"
+            else -> "Timer ${timerSeconds} seconds"
         }
     }
 
@@ -516,75 +615,83 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
     }
 
+    private fun zoomBounds(): Pair<Float, Float> {
+        val characteristics = cameraCharacteristics ?: return 1f to 1f
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val range = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            if (range != null) {
+                return range.lower.coerceAtLeast(0.1f) to range.upper.coerceAtLeast(1f)
+            }
+        }
+        val maxZoom = characteristics
+            .get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+            ?.coerceAtLeast(1f) ?: 1f
+        return 1f to maxZoom
+    }
+
     private fun setZoomButtons() {
         if (!::zoomRow.isInitialized) return
         zoomRow.removeAllViews()
-        val characteristics = cameraCharacteristics
-        var minZoom = 1f
-        var maxZoom = 1f
-        if (characteristics != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val range = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
-                if (range != null) {
-                    minZoom = range.lower.coerceAtMost(1f)
-                    maxZoom = range.upper.coerceAtLeast(1f)
-                } else {
-                    maxZoom = characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
-                }
-            } else {
-                maxZoom = characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
-            }
-        }
+
+        val bounds = zoomBounds()
+        val minZoom = bounds.first
+        val maxZoom = bounds.second
         val levels = mutableListOf<Float>()
         if (minZoom <= 0.55f) levels.add(0.5f)
         levels.add(1f)
         if (maxZoom >= 1.9f) levels.add(2f)
         if (maxZoom >= 3.8f) levels.add(4f)
         zoomLevels = levels.distinct()
-        if (zoomRatio !in minZoom..maxZoom) zoomRatio = 1f
+        zoomRatio = zoomRatio.coerceIn(minZoom, maxZoom)
+
         zoomLevels.forEach { level ->
+            val selected = abs(zoomRatio - level) < 0.08f
             val chip = TextView(this).apply {
                 text = if (level == 1f) "1×" else "${level}×"
-                textSize = 12f
+                textSize = 13f
                 gravity = Gravity.CENTER
-                setPadding(dp(13), dp(8), dp(13), dp(8))
-                setTextColor(if (abs(zoomRatio - level) < 0.01f) Color.WHITE else 0xFFDDDDDD.toInt())
-                background = rounded(
-                    if (abs(zoomRatio - level) < 0.01f) 0xAA263142.toInt() else 0x55202020,
-                    100,
-                    if (abs(zoomRatio - level) < 0.01f) 0x99FFFFFF.toInt() else 0x44FFFFFF
-                )
+                setTextColor(if (selected) Color.BLACK else Color.WHITE)
+                background = if (selected) oval(Color.WHITE) else null
                 isClickable = true
+                isFocusable = true
                 setOnClickListener { setZoom(level) }
             }
-            zoomRow.addView(chip, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)
-            ).apply {
-                marginStart = dp(5)
-                marginEnd = dp(5)
-            })
+            val diameter = if (selected) dp(48) else dp(42)
+            zoomRow.addView(
+                chip,
+                LinearLayout.LayoutParams(diameter, dp(48)).apply {
+                    marginStart = dp(7)
+                    marginEnd = dp(7)
+                }
+            )
         }
     }
 
     private fun setZoom(value: Float) {
-        zoomRatio = value
+        val bounds = zoomBounds()
+        zoomRatio = value.coerceIn(bounds.first, bounds.second)
         setZoomButtons()
         startPreviewRepeating()
     }
 
     private fun openLastPhoto() {
-        val uri = lastPhotoUri
-        if (uri == null) {
-            Toast.makeText(this, "Your captured photos will appear here.", Toast.LENGTH_SHORT).show()
+        try {
+            startActivity(
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_GALLERY)
+            )
             return
+        } catch (_: Exception) {
+            // Fall back to the latest image or the system media collection.
         }
+
+        val uri = lastPhotoUri ?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         try {
             startActivity(Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "image/jpeg")
+                setDataAndType(uri, "image/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             })
         } catch (_: Exception) {
-            Toast.makeText(this, "No photo viewer is available.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No gallery app is available.", Toast.LENGTH_SHORT).show()
         }
     }
 
