@@ -70,6 +70,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var cameraId: String? = null
     private var previewSize: Size? = null
+    private var previewSurface: Surface? = null
     private var backgroundThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
     private val mainHandler = Handler(mainLooper)
@@ -220,7 +221,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         tabLabels = labels
         tabIndicators = indicators
-        topPanel.addView(tabs)
+        topPanel.addView(tabs, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(43)))
 
         quickControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -283,7 +284,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         galleryThumbnail = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            background = rounded(0x553FFFFFF, 12)
+            background = rounded(0x55333333, 12)
             setImageDrawable(textDrawablePlaceholder())
             isClickable = true
             setOnClickListener { openLastPhoto() }
@@ -646,8 +647,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     openingCamera = false
                     cameraDevice = camera
                     cameraCharacteristics = cameraManager.getCameraCharacteristics(id)
-                    setZoomButtons()
-                    updateFlashButton()
+                    runOnUiThread {
+                        setZoomButtons()
+                        updateFlashButton()
+                    }
                     createImageReaderAndSession()
                 }
 
@@ -735,16 +738,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         try {
             val size = previewSize
             if (size != null) texture.setDefaultBufferSize(size.width, size.height)
-            val previewSurface = Surface(texture)
             captureSession?.close()
             captureSession = null
+            previewSurface?.release()
+            previewSurface = Surface(texture)
+            configurePreviewTransform(previewView.width, previewView.height)
             device.createCaptureSession(
-                listOf(previewSurface, reader.surface),
+                listOf(previewSurface!!, reader.surface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (cameraDevice !== device) {
                             session.close()
-                            previewSurface.release()
                             return
                         }
                         captureSession = session
@@ -770,7 +774,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val session = captureSession ?: return
         val texture = previewView.surfaceTexture ?: return
         try {
-            val surface = Surface(texture)
+            val surface = previewSurface ?: return
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(surface)
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
@@ -780,7 +784,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 applyZoom(this)
             }
             session.setRepeatingRequest(request.build(), null, cameraHandler)
-            surface.release()
         } catch (e: CameraAccessException) {
             runOnUiThread {
                 Toast.makeText(this, "Preview error: ${e.reason}", Toast.LENGTH_SHORT).show()
@@ -850,6 +853,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         try {
             captureSession?.close()
             captureSession = null
+            previewSurface?.release()
+            previewSurface = null
             cameraDevice?.close()
             cameraDevice = null
             imageReader?.close()
@@ -896,7 +901,34 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        // The camera stream remains active; the viewfinder scales to the new bounds.
+        configurePreviewTransform(width, height)
+    }
+
+    private fun configurePreviewTransform(viewWidth: Int, viewHeight: Int) {
+        val size = previewSize ?: return
+        if (viewWidth <= 0 || viewHeight <= 0) return
+        val rotation = windowManager.defaultDisplay.rotation
+        val matrix = android.graphics.Matrix()
+        val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
+        val bufferRect = android.graphics.RectF(
+            0f, 0f, size.height.toFloat(), size.width.toFloat()
+        )
+        val centerX = viewRect.centerX()
+        val centerY = viewRect.centerY()
+
+        if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, android.graphics.Matrix.ScaleToFit.FILL)
+            val scale = max(
+                viewHeight.toFloat() / bufferRect.height(),
+                viewWidth.toFloat() / bufferRect.width()
+            )
+            matrix.postScale(scale, scale, centerX, centerY)
+            matrix.postRotate(90f * (rotation - 2), centerX, centerY)
+        } else if (rotation == Surface.ROTATION_180) {
+            matrix.postRotate(180f, centerX, centerY)
+        }
+        previewView.setTransform(matrix)
     }
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
