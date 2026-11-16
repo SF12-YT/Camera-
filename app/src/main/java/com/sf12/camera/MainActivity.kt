@@ -394,8 +394,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         )
         previewView.setOnTouchListener { _, event ->
-            val handled = scaleGestureDetector.onTouchEvent(event)
-            handled || event.pointerCount > 1
+            scaleGestureDetector.onTouchEvent(event)
+            true
         }
 
         selectMode("Photo")
