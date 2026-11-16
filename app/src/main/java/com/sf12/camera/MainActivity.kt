@@ -246,7 +246,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             clipToPadding = false
-            fillViewport = true
+            isFillViewport = true
         }
         modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -278,9 +278,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         modeLabels = labels
         modeScroll.addView(
             modeRow,
-            HorizontalScrollView.LayoutParams(
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
-                HorizontalScrollView.LayoutParams.MATCH_PARENT
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
         bottomPanel.addView(
