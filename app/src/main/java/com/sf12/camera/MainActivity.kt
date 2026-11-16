@@ -24,6 +24,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Range
 import android.util.Size
@@ -73,7 +74,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var previewSurface: Surface? = null
     private var backgroundThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
-    private val mainHandler = Handler(mainLooper)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var lensFacing = CameraCharacteristics.LENS_FACING_BACK
     private var activeTab = "Basic"
