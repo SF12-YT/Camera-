@@ -703,8 +703,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             (closeRatios.ifEmpty { jpegSizes }).maxByOrNull { it.width.toLong() * it.height.toLong() }
         } ?: jpegSizes[0]
 
-        previewSize = map.getOutputSizes(SurfaceTexture::class.java)
-            ?.maxByOrNull { it.width.toLong() * it.height.toLong() }
+        val previewSizes = map.getOutputSizes(SurfaceTexture::class.java)?.toList().orEmpty()
+        previewSize = previewSizes
+            .filter { it.width >= 1280 && it.height >= 720 }
+            .minByOrNull { it.width.toLong() * it.height.toLong() }
+            ?: previewSizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
         imageReader?.close()
         imageReader = ImageReader.newInstance(
             selectedSize.width,
