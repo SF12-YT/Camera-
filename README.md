@@ -53,3 +53,8 @@ Version: **0.1.0**
 ## Design direction
 
 The interface takes inspiration from Samsung's dark camera UI and One UI visual language: restrained typography, rounded quick-control surfaces, a large viewfinder, and a prominent shutter button. It is an original implementation, not a copy of Samsung's proprietary application.
+
+
+## Release publishing
+
+Debug APKs are published directly to GitHub Releases; CI artifact storage is not required.
