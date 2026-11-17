@@ -156,6 +156,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    @Deprecated("Deprecated in Android API; retained for back compatibility.")
+    override fun onBackPressed() {
+        if (expandedOptionsKind != null) {
+            closeExpandedOptions()
+            return
+        }
+        super.onBackPressed()
+    }
+
     override fun onPause() {
         mainHandler.removeCallbacks(timerRunnable)
         capturePending = false
@@ -493,6 +502,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         )
         previewView.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN &&
+                expandedOptionsKind != null
+            ) {
+                closeExpandedOptions()
+            }
             if (event.pointerCount > 1) gestureHadMultiplePointers = true
             scaleGestureDetector.onTouchEvent(event)
             gestureDetector.onTouchEvent(event)
@@ -1761,7 +1775,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lineTo(15.3f, 16f)
                 close()
             }
-            canvas.drawPath(play, p)
+            val playPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = p.color
+                style = android.graphics.Paint.Style.FILL
+            }
+            canvas.drawPath(play, playPaint)
         }
 
         private fun drawFilters(canvas: android.graphics.Canvas) {
