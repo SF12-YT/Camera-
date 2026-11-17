@@ -408,30 +408,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val switchContainer = FrameLayout(this)
         val switchSlot = FrameLayout(this).apply {
             background = oval(0x55333333)
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Switch camera"
-            setOnClickListener { switchCamera() }
         }
-        val switchIcon = TextView(this).apply {
-            text = "↻"
-            textSize = 31f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
+        val switchIcon = CameraIconButton(this, "flip") { switchCamera() }.apply {
+            contentDescription = "Switch camera"
+            background = null
         }
         switchSlot.addView(
             switchIcon,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
             )
         )
-        switchContainer.addView(
-            switchSlot,
-            FrameLayout.LayoutParams(dp(62), dp(62), Gravity.CENTER)
-        )
         shutterRow.addView(
-            switchContainer,
+            switchSlot,
             LinearLayout.LayoutParams(0, dp(82), 1f)
         )
         bottomPanel.addView(
@@ -1134,8 +1125,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         val cameraRollUri = cameraRollAlbumUri()
-        val samsungIntent = Intent(Intent.ACTION_VIEW, cameraRollUri).apply {
+        val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(cameraRollUri, "vnd.android.cursor.dir/image")
             setPackage("com.sec.android.gallery3d")
+            putExtra("windowTitle", "Camera")
+            putExtra("mediaTypes", 1) // ImageManager.INCLUDE_IMAGES in Gallery2
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {
@@ -1147,7 +1141,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         try {
             startActivity(
-                Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        "vnd.android.cursor.dir/image"
+                    )
+                    putExtra("mediaTypes", 1)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
             )
@@ -1638,9 +1637,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         override fun onDraw(canvas: android.graphics.Canvas) {
             super.onDraw(canvas)
-            val size = dp(23).toFloat()
+            val isRatioChoice = icon.startsWith("ratio_")
+            val size = dp(if (isRatioChoice) 19 else 23).toFloat()
             canvas.save()
-            canvas.translate((width - size) / 2f, (height - size) / 2f)
+            canvas.translate(
+                (width - size) / 2f,
+                if (isRatioChoice) dp(3f).toFloat() else (height - size) / 2f
+            )
             canvas.scale(size / 24f, size / 24f)
 
             val yellow = 0xFFFFD54F.toInt()
@@ -1682,8 +1685,41 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "motion" -> drawMotion(canvas)
                 "filters" -> drawFilters(canvas)
                 "gallery" -> drawGallery(canvas)
+                "flip" -> drawFlip(canvas)
             }
             canvas.restore()
+            if (icon.startsWith("ratio_")) {
+                val ratioLabel = when (icon) {
+                    "ratio_9_16" -> "9:16"
+                    "ratio_1_1" -> "1:1"
+                    "ratio_full" -> "Full"
+                    else -> "3:4"
+                }
+                val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = if (isHighlightedRatio()) 0xFFFFD54F.toInt() else Color.WHITE
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    textSize = dp(10f).toFloat()
+                    typeface = android.graphics.Typeface.create(
+                        "sans-serif-medium",
+                        android.graphics.Typeface.NORMAL
+                    )
+                }
+                canvas.drawText(
+                    ratioLabel,
+                    width / 2f,
+                    height - dp(4f),
+                    labelPaint
+                )
+            }
+        }
+
+        private fun isHighlightedRatio(): Boolean {
+            return when (icon) {
+                "ratio_9_16" -> aspectRatio == "9:16"
+                "ratio_1_1" -> aspectRatio == "1:1"
+                "ratio_full" -> aspectRatio == "Full"
+                else -> aspectRatio == "3:4"
+            }
         }
 
         private fun drawSettings(canvas: android.graphics.Canvas) {
@@ -1739,9 +1775,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (seconds == 0) {
                 canvas.drawCircle(11.5f, 11.5f, 8.6f, strokePaint)
             } else {
-                // Leave the lower-right quadrant open so the duration sits beside
-                // the clock face, as in Samsung Camera's timer selector.
-                canvas.drawArc(face, 90f, 270f, false, strokePaint)
+                // Leave a 90-degree opening centred at 225 degrees; the seconds
+                // label is drawn inside that opening instead of over the clock rim.
+                canvas.drawArc(face, 270f, 270f, false, strokePaint)
             }
             canvas.drawLine(11.5f, 11.5f, 11.5f, 5.8f, strokePaint)
             canvas.drawLine(11.5f, 11.5f, 15.2f, 13.6f, strokePaint)
@@ -1759,8 +1795,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 canvas.drawText(
                     seconds.toString(),
-                    if (seconds == 10) 19.3f else 18.5f,
-                    20.9f,
+                    if (seconds == 10) 4.3f else 5.0f,
+                    7.4f,
                     numberPaint
                 )
             }
@@ -1860,6 +1896,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             canvas.drawLine(2.4f, 5.4f, 6.6f, 5.4f, p)
             canvas.drawLine(20f, 14.4f, 20f, 18.5f, p)
             canvas.drawLine(17.9f, 16.45f, 22.1f, 16.45f, p)
+        }
+
+        private fun drawFlip(canvas: android.graphics.Canvas) {
+            val p = strokePaint
+            // Two opposing curved arrows kept symmetric around the icon centre.
+            canvas.drawArc(
+                android.graphics.RectF(3.2f, 3.2f, 20.8f, 20.8f),
+                205f,
+                145f,
+                false,
+                p
+            )
+            val topArrow = android.graphics.Path().apply {
+                moveTo(3.8f, 6.5f)
+                lineTo(3.5f, 2.8f)
+                lineTo(7.2f, 4.1f)
+            }
+            canvas.drawPath(topArrow, p)
+            canvas.drawArc(
+                android.graphics.RectF(3.2f, 3.2f, 20.8f, 20.8f),
+                25f,
+                145f,
+                false,
+                p
+            )
+            val bottomArrow = android.graphics.Path().apply {
+                moveTo(20.2f, 17.5f)
+                lineTo(20.5f, 21.2f)
+                lineTo(16.8f, 19.9f)
+            }
+            canvas.drawPath(bottomArrow, p)
         }
 
         private fun drawGallery(canvas: android.graphics.Canvas) {
