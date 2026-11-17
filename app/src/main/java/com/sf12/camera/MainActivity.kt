@@ -958,21 +958,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     gravity = Gravity.CENTER_VERTICAL
                 }, LinearLayout.LayoutParams(0, dp(44), 1f))
 
-                val list = items
+                val sourceList = if (isMain) primaryModes else moreModes
                 if (index > 0) {
                     row.addView(actionButton("↑") {
-                        val item = list.removeAt(index)
-                        list.add(index - 1, item)
+                        val item = sourceList.removeAt(index)
+                        sourceList.add(index - 1, item)
                         saveCameraModeConfiguration()
                         render()
                     }, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
                         marginEnd = dp(4)
                     })
                 }
-                if (index < list.lastIndex) {
+                if (index < items.lastIndex) {
                     row.addView(actionButton("↓") {
-                        val item = list.removeAt(index)
-                        list.add(index + 1, item)
+                        val item = sourceList.removeAt(index)
+                        sourceList.add(index + 1, item)
                         saveCameraModeConfiguration()
                         render()
                     }, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
