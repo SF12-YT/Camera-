@@ -2062,9 +2062,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun queryCameraRoll(storage: CameraStorageLocation): List<CameraRollPhoto> {
+    private fun queryCameraRoll(): List<CameraRollPhoto> {
+        // VOLUME_EXTERNAL is MediaStore's combined view of all shared external
+        // storage volumes. It includes both primary/internal storage and an
+        // indexed removable SD card, regardless of the selected save location.
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(storage.volumeName)
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         }
@@ -2076,8 +2079,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val selection: String
         val selectionArgs: Array<String>
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-            selectionArgs = arrayOf(Environment.DIRECTORY_DCIM + "/Camera/%")
+            selection = "(${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
+                "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
+            selectionArgs = arrayOf(
+                Environment.DIRECTORY_DCIM + "/Camera",
+                Environment.DIRECTORY_DCIM + "/Camera/%"
+            )
         } else {
             selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
             selectionArgs = arrayOf("Camera")
@@ -2123,15 +2130,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             Toast.makeText(this, "Allow photo access to open the Camera roll.", Toast.LENGTH_SHORT).show()
             return
         }
-        val storage = selectedCameraStorageLocation()
-        if (storage == null) {
-            Toast.makeText(
-                this,
-                "The selected storage is unavailable. Choose an available location in Camera settings.",
-                Toast.LENGTH_LONG
-            ).show()
-            return
-        }
         closeCameraRoll()
         val overlay = FrameLayout(this).apply {
             setBackgroundColor(0xFF080808.toInt())
@@ -2160,9 +2158,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
 
         Thread {
+            var queryError: Exception? = null
             val photos = try {
-                queryCameraRoll(storage)
-            } catch (_: Exception) {
+                queryCameraRoll()
+            } catch (error: Exception) {
+                queryError = error
                 emptyList()
             }
             mainHandler.post {
@@ -2191,7 +2191,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                 })
                 titleColumn.addView(TextView(this).apply {
-                    text = "${photos.size} photos · DCIM/Camera · Newest first"
+                    text = "${photos.size} photos · All storage · Newest first"
                     textSize = 11f
                     setTextColor(0xFFBDBDBD.toInt())
                 })
@@ -2207,9 +2207,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 header.addView(closeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
                 screen.addView(header)
 
-                if (photos.isEmpty()) {
+                if (queryError != null || photos.isEmpty()) {
                     screen.addView(TextView(this).apply {
-                        text = "No photos found in ${storage.label}/DCIM/Camera."
+                        text = if (queryError != null) {
+                            "Couldn't load Camera roll. Check photo access and try again."
+                        } else {
+                            "No photos found in DCIM/Camera on available storage."
+                        }
                         textSize = 14f
                         gravity = Gravity.CENTER
                         setTextColor(0xFFCCCCCC.toInt())
@@ -2265,6 +2269,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     // Keep every photo in the album, but decode thumbnails only near
                     // the visible scroll position to avoid loading the whole camera roll.
                     val requestedThumbnails = mutableSetOf<Int>()
+                    val thumbnailRetryCounts = mutableMapOf<Int, Int>()
                     fun loadThumbnailRange(firstIndex: Int, lastIndex: Int) {
                         if (photos.isEmpty()) return
                         val from = firstIndex.coerceAtLeast(0)
@@ -2288,17 +2293,31 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                                     } else {
                                         null
                                     }
-                                    mainHandler.post {
-                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
-                                            if (bitmap != null) {
+                                    if (bitmap != null) {
+                                        mainHandler.post {
+                                            if (cameraRollOverlay === overlay && index < imageViews.size) {
                                                 imageViews[index].setImageBitmap(bitmap)
-                                            } else {
-                                                imageViews[index].setImageURI(photo.uri)
                                             }
                                         }
+                                    } else {
+                                        throw IllegalStateException("MediaStore returned no thumbnail")
                                     }
                                 } catch (_: Exception) {
-                                    // Keep a neutral tile when a photo cannot be decoded.
+                                    val retry = synchronized(requestedThumbnails) {
+                                        val attempts = (thumbnailRetryCounts[index] ?: 0) + 1
+                                        thumbnailRetryCounts[index] = attempts
+                                        if (attempts <= 2) requestedThumbnails.remove(index)
+                                        attempts
+                                    }
+                                    if (retry <= 2) {
+                                        mainHandler.postDelayed({
+                                            if (cameraRollOverlay === overlay) {
+                                                loadThumbnailRange(index, index)
+                                            }
+                                        }, 500L * retry)
+                                    } else {
+                                        // Leave the tile neutral after the bounded retries.
+                                    }
                                 }
                             }
                         }.start()
