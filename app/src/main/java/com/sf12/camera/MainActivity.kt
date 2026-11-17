@@ -72,7 +72,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var motionPhotoButton: CameraIconButton
     private lateinit var filterButton: CameraIconButton
     private lateinit var galleryThumbnail: ImageView
-    private lateinit var galleryPlaceholder: TextView
+    private lateinit var galleryPlaceholder: CameraIconButton
     private lateinit var shutterButton: FrameLayout
     private lateinit var modeLabels: Map<String, TextView>
     private lateinit var scaleGestureDetector: ScaleGestureDetector
@@ -333,12 +333,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             galleryThumbnail,
             FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
         )
-        galleryPlaceholder = TextView(this).apply {
-            text = "▣"
-            textSize = 22f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
+        galleryPlaceholder = CameraIconButton(this, "gallery") { }.apply {
+            contentDescription = "Most recent camera photo"
             isClickable = false
+            isFocusable = false
         }
         gallerySlot.addView(
             galleryPlaceholder,
@@ -908,14 +906,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val selection: String
                 val selectionArgs: Array<String>
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    selection = "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND ${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"
+                    selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
                     selectionArgs = arrayOf(
-                        Environment.DIRECTORY_PICTURES + "/Camera/",
-                        "Camera_%"
+                        Environment.DIRECTORY_DCIM + "/Camera/%",
+                        Environment.DIRECTORY_PICTURES + "/Camera/%"
                     )
                 } else {
-                    selection = "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"
-                    selectionArgs = arrayOf("Camera_%")
+                    selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+                    selectionArgs = arrayOf("Camera")
                 }
 
                 contentResolver.query(
