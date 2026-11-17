@@ -142,6 +142,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (hasCameraPermission()) {
             if (previewView.isAvailable) openCamera()
+            if (hasGalleryReadPermission()) {
+                if (::galleryThumbnail.isInitialized) loadLatestCameraThumbnail()
+            } else {
+                val asked = getSharedPreferences("camera_settings", MODE_PRIVATE)
+                    .getBoolean("gallery_read_permission_asked", false)
+                if (!asked) requestGalleryReadPermission()
+            }
         } else {
             requestCameraPermissions()
         }
@@ -955,6 +962,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun openLastPhoto() {
+        if (!hasGalleryReadPermission() && lastPhotoUri == null) {
+            requestGalleryReadPermission()
+            Toast.makeText(this, "Allow photo access to open your latest camera shot.", Toast.LENGTH_SHORT).show()
+            return
+        }
         val uri = lastPhotoUri
         if (uri != null) {
             val samsungGalleryIntent = Intent(Intent.ACTION_VIEW).apply {
@@ -1334,8 +1346,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (!hasGalleryReadPermission()) {
             permissions.add(galleryReadPermission())
+            getSharedPreferences("camera_settings", MODE_PRIVATE)
+                .edit().putBoolean("gallery_read_permission_asked", true).apply()
         }
         requestPermissions(permissions.toTypedArray(), permissionRequestCode)
+    }
+
+    private fun requestGalleryReadPermission() {
+        getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .edit().putBoolean("gallery_read_permission_asked", true).apply()
+        requestPermissions(
+            arrayOf(galleryReadPermission()),
+            galleryPermissionRequestCode
+        )
     }
 
     @Deprecated("Deprecated in Android API; retained for minSdk compatibility.")
