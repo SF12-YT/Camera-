@@ -635,7 +635,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val readOnly = state == Environment.MEDIA_MOUNTED_READ_ONLY
             val platformVolumeName = try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    volume.mediaStoreVolumeName
+                    volume.mediaStoreVolumeName ?: volume.uuid?.lowercase(Locale.US)
                 } else {
                     volume.uuid?.lowercase(Locale.US)
                 }
@@ -1903,9 +1903,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     }
                     scroll.addView(
                         grid,
-                        android.widget.ScrollView.LayoutParams(
-                            android.widget.ScrollView.LayoutParams.MATCH_PARENT,
-                            android.widget.ScrollView.LayoutParams.WRAP_CONTENT
+                        android.view.ViewGroup.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
                         )
                     )
                     screen.addView(
