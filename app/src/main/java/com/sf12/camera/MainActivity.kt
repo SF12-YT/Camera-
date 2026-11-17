@@ -108,7 +108,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var selectedEffectMode = CaptureRequest.CONTROL_EFFECT_MODE_OFF
     private var expandedOptionsKind: String? = null
     private var gestureHadMultiplePointers = false
-    private var primaryModes = mutableListOf("Photo", "Video", "Pro", "More")
+    private var primaryModes = mutableListOf("Portrait", "Photo", "Video", "More")
     private var moreModes = mutableListOf(
         "Single Take", "Night", "Food", "Panorama",
         "Hyperlapse", "Portrait Video"
@@ -131,7 +131,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val dateTaken: Long
     )
     private val knownCameraModes = listOf(
-        "Portrait", "Photo", "Video", "Pro", "Night", "Single Take", "Food",
+        "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
         "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
     )
     private var lastPhotoUri: Uri? = null
@@ -165,16 +165,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         aspectRatio = preferences.getString("photo_ratio", "3:4") ?: "3:4"
 
         preferences.getString("primary_camera_modes", null)?.let { saved ->
-            val savedModes = saved.split("|").filter { it in knownCameraModes }.distinct()
-            val configured = if (savedModes == listOf("Portrait", "Photo", "Video")) {
-                listOf("Photo", "Video", "Pro")
-            } else {
-                savedModes
-            }.toMutableList()
+            val configured = saved.split("|")
+                .filter { it in knownCameraModes }
+                .distinct()
+                .toMutableList()
             if (configured.isNotEmpty()) {
                 primaryModes = (configured + "More").toMutableList()
             }
         }
+        primaryModes.remove("Pro")
         preferences.getString("more_camera_modes", null)?.let { saved ->
             moreModes = saved.split("|")
                 .filter { it in knownCameraModes && it !in primaryModes }
@@ -736,13 +735,94 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
             setPadding(dp(2), dp(22), 0, dp(10))
         })
-        val storageLabel = selectedCameraStorageLocation()?.label ?: "Internal storage"
+        val storagePreferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
+        val storageLocations = availableCameraStorageLocations()
+        val sdLocation = storageLocations.firstOrNull { it.isRemovable }
+        val storageOptions = listOf("Internal Storage", "SD Card")
+
+        val storageSpinner = android.widget.Spinner(this, android.widget.Spinner.MODE_DROPDOWN).apply {
+            background = rounded(0xFF202020.toInt(), 12, 0xFF444444.toInt())
+            popupBackground = rounded(0xFF202020.toInt(), 10)
+            dropDownVerticalOffset = dp(4)
+            dropDownWidth = FrameLayout.LayoutParams.MATCH_PARENT
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        val storageAdapter = object : android.widget.ArrayAdapter<String>(
+            this,
+            0,
+            storageOptions
+        ) {
+            private fun itemView(position: Int, dropdown: Boolean): TextView {
+                return TextView(this@MainActivity).apply {
+                    text = storageOptions[position]
+                    textSize = 14f
+                    gravity = Gravity.CENTER_VERTICAL
+                    includeFontPadding = false
+                    setTextColor(Color.WHITE)
+                    setPadding(dp(14), if (dropdown) dp(13) else dp(12), dp(14), if (dropdown) dp(13) else dp(12))
+                    if (dropdown) setBackgroundColor(0xFF202020.toInt())
+                }
+            }
+
+            override fun getView(position: Int, convertView: View?, parent: android.view.ViewGroup): View {
+                return itemView(position, false)
+            }
+
+            override fun getDropDownView(position: Int, convertView: View?, parent: android.view.ViewGroup): View {
+                return itemView(position, true)
+            }
+        }
+        storageSpinner.adapter = storageAdapter
+
+        val selectedStorage = selectedCameraStorageLocation()
+        storageSpinner.setSelection(if (selectedStorage?.isRemovable == true) 1 else 0)
+        var ignoreInitialStorageSelection = true
+        val storageSummary = TextView(this).apply {
+            text = "Photos are saved in DCIM/Camera."
+            textSize = 12f
+            setTextColor(0xFFBDBDBD.toInt())
+            setPadding(dp(2), dp(7), 0, 0)
+        }
+        storageSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (ignoreInitialStorageSelection) {
+                    ignoreInitialStorageSelection = false
+                    return
+                }
+                val location = if (position == 0) {
+                    storageLocations.firstOrNull { !it.isRemovable }
+                } else {
+                    sdLocation
+                }
+                if (location == null || !location.isAvailable) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "SD Card is not currently available.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    storageSpinner.setSelection(0)
+                    return
+                }
+                storagePreferences.edit()
+                    .putString("camera_storage_volume", location.volumeName)
+                    .apply()
+                lastPhotoUri = null
+                loadLatestCameraThumbnail()
+                storageSummary.text = "Photos are saved to " + storageOptions[position] + "/DCIM/Camera."
+            }
+        }
+
         val storageCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(14), dp(14), dp(14))
             background = rounded(0xFF202020.toInt(), 13, 0xFF383838.toInt())
-            isClickable = true
-            isFocusable = true
             addView(TextView(this@MainActivity).apply {
                 text = "Save photos to"
                 textSize = 14f
@@ -751,14 +831,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     "sans-serif-medium",
                     android.graphics.Typeface.NORMAL
                 )
+                setPadding(0, 0, 0, dp(8))
             })
-            addView(TextView(this@MainActivity).apply {
-                text = "$storageLabel  ·  DCIM/Camera"
-                textSize = 12f
-                setTextColor(0xFFBDBDBD.toInt())
-                setPadding(0, dp(5), 0, 0)
-            })
-            setOnClickListener { showStorageLocationPicker() }
+            addView(
+                storageSpinner,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(48)
+                )
+            )
+            addView(storageSummary)
         }
         content.addView(storageCard)
 
@@ -884,56 +966,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             .firstOrNull { it.isAvailable && it.volumeName == selectedVolume }
     }
 
-    private fun showStorageLocationPicker() {
-        val locations = availableCameraStorageLocations()
-        val preferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
-        val selectedVolume = preferences.getString(
-            "camera_storage_volume",
-            MediaStore.VOLUME_EXTERNAL_PRIMARY
-        )
-        val selectedIndex = locations.indexOfFirst {
-            it.isAvailable && it.volumeName == selectedVolume
-        }
-        val labels = locations.map { location ->
-            if (location.isAvailable) {
-                "${location.label}  ·  DCIM/Camera"
-            } else {
-                "${location.label}  ·  ${location.status}"
-            }
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("Save photos to")
-            .setMessage(
-                "Android detected ${locations.count { it.isRemovable }} removable volume(s); " +
-                    "${locations.count { it.isRemovable && it.isAvailable }} are ready for Camera storage."
-            )
-            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
-                val location = locations[which]
-                if (!location.isAvailable) {
-                    Toast.makeText(
-                        this,
-                        "${location.label}: ${location.status}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    return@setSingleChoiceItems
-                }
-                preferences.edit()
-                    .putString("camera_storage_volume", location.volumeName)
-                    .apply()
-                lastPhotoUri = null
-                loadLatestCameraThumbnail()
-                Toast.makeText(
-                    this,
-                    "Saving to ${location.label}/DCIM/Camera",
-                    Toast.LENGTH_SHORT
-                ).show()
-                dialog.dismiss()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
     private fun saveCameraModeConfiguration() {
         getSharedPreferences("camera_settings", MODE_PRIVATE)
             .edit()
@@ -963,6 +995,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         moreModes.remove("Pro Video")
         primaryModes.remove("Pro Video")
+        moreModes.remove("Pro")
+        primaryModes.remove("Pro")
         val availableBaseModes = listOf(
             "Portrait", "Photo", "Video", "Night", "Single Take",
             "Food", "Panorama", "Hyperlapse", "Portrait Video"
@@ -1013,7 +1047,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { selectMode(mode) }
+                setOnClickListener {
+                    if (!modeEditing) selectMode(mode)
+                }
+                if (modeEditing && mode != "More") {
+                    contentDescription = "Hold and drag $mode"
+                    setOnLongClickListener {
+                        val payload = ModeDragPayload(mode, "main")
+                        val clip = ClipData.newPlainText("camera-mode", mode)
+                        @Suppress("DEPRECATION")
+                        it.startDrag(clip, View.DragShadowBuilder(it), payload, 0)
+                    }
+                    setModeDropTarget(this, "main", mode)
+                }
             }
             modeRow.addView(
                 label,
@@ -1084,223 +1130,84 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun showMoreModes() {
         closeMoreModes(resetEditing = false)
         val overlay = FrameLayout(this).apply {
-            // Normal MORE remains translucent over the viewfinder. Edit mode
-            // follows Samsung's full-black mode arrangement screen.
-            setBackgroundColor(if (modeEditing) Color.BLACK else 0x33000000)
-            setOnClickListener { if (!modeEditing) closeMoreModes() }
+            // 70% transparent black over the same live camera screen.
+            setBackgroundColor(0x4D000000)
+            setOnClickListener { closeMoreModes() }
         }
 
         if (modeEditing) {
             val instruction = TextView(this).apply {
                 text = "Touch and hold to move modes to or from the bottom of the screen."
-                textSize = 13.5f
+                textSize = 12.5f
                 gravity = Gravity.CENTER
                 includeFontPadding = false
                 setTextColor(0xFFF2F2F2.toInt())
-                setPadding(dp(24), 0, dp(24), 0)
+                setPadding(dp(20), 0, dp(20), 0)
+                isClickable = false
             }
             overlay.addView(
                 instruction,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
-                    dp(48),
+                    dp(40),
                     Gravity.TOP
-                ).apply { topMargin = dp(112) }
-            )
-
-            val grid = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(dp(8), 0, dp(8), 0)
-                isClickable = true
-            }
-            addModeGridRows(grid, moreModes, editing = true, group = "more")
-            if (moreModes.isEmpty()) {
-                grid.addView(TextView(this).apply {
-                    text = "Drag modes here"
-                    textSize = 13f
-                    gravity = Gravity.CENTER
-                    setTextColor(0xFFBBBBBB.toInt())
-                    setPadding(0, dp(24), 0, dp(24))
-                }, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, dp(105)
-                ))
-                setModeDropTarget(grid, "more", null)
-            }
-            val gridScroll = android.widget.ScrollView(this).apply {
-                isFillViewport = false
-                isVerticalScrollBarEnabled = false
-                overScrollMode = View.OVER_SCROLL_NEVER
-                addView(
-                    grid,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT
-                    )
-                )
-            }
-            overlay.addView(
-                gridScroll,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    dp(340),
-                    Gravity.TOP
-                ).apply { topMargin = dp(174) }
-            )
-
-            // Bottom mode strip: text-only labels, with a selected state like
-            // Samsung's editor. Long-press to move/reorder; dropping on the
-            // empty strip appends a mode.
-            val modeStrip = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(dp(8), 0, dp(8), 0)
-                isClickable = true
-            }
-            primaryModes.filter { it != "More" }.forEach { mode ->
-                val label = TextView(this).apply {
-                    text = mode.uppercase(Locale.ROOT)
-                    textSize = 13f
-                    gravity = Gravity.CENTER
-                    includeFontPadding = false
-                    setTextColor(if (mode == activePrimaryMode) Color.WHITE else 0xFF777777.toInt())
-                    typeface = if (mode == activePrimaryMode) {
-                        android.graphics.Typeface.create(
-                            "sans-serif-medium", android.graphics.Typeface.NORMAL
-                        )
-                    } else {
-                        android.graphics.Typeface.create(
-                            "sans-serif", android.graphics.Typeface.NORMAL
-                        )
-                    }
-                    isClickable = true
-                    isFocusable = true
-                    contentDescription = "Hold and drag $mode"
-                    setOnLongClickListener {
-                        val payload = ModeDragPayload(mode, "main")
-                        val clip = ClipData.newPlainText("camera-mode", mode)
-                        @Suppress("DEPRECATION")
-                        it.startDrag(clip, View.DragShadowBuilder(it), payload, 0)
-                    }
-                    setOnClickListener {
-                        activePrimaryMode = mode
-                        activeMode = mode
-                        updatePrimaryModeLabels()
-                    }
-                    setOnDragListener { target, event ->
-                        when (event.action) {
-                            DragEvent.ACTION_DRAG_STARTED -> event.localState is ModeDragPayload
-                            DragEvent.ACTION_DRAG_ENTERED -> {
-                                target.alpha = 0.55f
-                                true
-                            }
-                            DragEvent.ACTION_DRAG_EXITED -> {
-                                target.alpha = 1f
-                                true
-                            }
-                            DragEvent.ACTION_DROP -> {
-                                target.alpha = 1f
-                                val payload = event.localState as? ModeDragPayload
-                                if (payload != null) moveCameraMode(payload, "main", mode)
-                                true
-                            }
-                            DragEvent.ACTION_DRAG_ENDED -> {
-                                target.alpha = 1f
-                                true
-                            }
-                            else -> true
-                        }
-                    }
-                }
-                modeStrip.addView(
-                    label,
-                    LinearLayout.LayoutParams(0, dp(44), 1f)
-                )
-            }
-            setModeDropTarget(modeStrip, "main", null)
-            overlay.addView(
-                modeStrip,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    dp(44),
-                    Gravity.BOTTOM
-                ).apply { bottomMargin = dp(155) }
-            )
-
-            val save = TextView(this).apply {
-                text = "Save"
-                textSize = 17f
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                setTextColor(Color.WHITE)
-                isClickable = true
-                isFocusable = true
-                setPadding(dp(28), 0, dp(28), 0)
-                setOnClickListener {
-                    modeEditing = false
-                    saveCameraModeConfiguration()
-                    rebuildModeStrip()
-                    showMoreModes()
-                }
-            }
-            overlay.addView(
-                save,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    dp(48),
-                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                ).apply { bottomMargin = dp(72) }
-            )
-        } else {
-            val grid = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(dp(12), 0, dp(12), 0)
-                isClickable = true
-                setOnClickListener { }
-            }
-            addModeGridRows(grid, moreModes, editing = false, group = "more")
-            if (moreModes.isEmpty()) {
-                grid.addView(TextView(this).apply {
-                    text = "No additional modes."
-                    textSize = 13f
-                    gravity = Gravity.CENTER
-                    setTextColor(0xFFBBBBBB.toInt())
-                    setPadding(0, dp(24), 0, dp(24))
-                })
-            }
-            overlay.addView(
-                grid,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP
-                ).apply { topMargin = dp(118) }
-            )
-
-            val addButton = TextView(this).apply {
-                text = "+"
-                textSize = 27f
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                setTextColor(Color.WHITE)
-                background = oval(0x55444444)
-                contentDescription = "Edit camera modes"
-                isClickable = true
-                isFocusable = true
-                setOnClickListener {
-                    modeEditing = true
-                    showMoreModes()
-                }
-            }
-            overlay.addView(
-                addButton,
-                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.BOTTOM).apply {
-                    marginEnd = dp(18)
-                    bottomMargin = dp(124)
-                }
+                ).apply { topMargin = dp(82) }
             )
         }
+
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(12), 0, dp(12), 0)
+            isClickable = true
+            setOnClickListener { }
+        }
+        addModeGridRows(grid, moreModes, editing = modeEditing, group = "more")
+        if (moreModes.isEmpty()) {
+            grid.addView(TextView(this).apply {
+                text = if (modeEditing) "Drag modes here" else "No additional modes."
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(0xFFBBBBBB.toInt())
+                setPadding(0, dp(24), 0, dp(24))
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(105)
+            ))
+            if (modeEditing) setModeDropTarget(grid, "more", null)
+        }
+
+        overlay.addView(
+            grid,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            ).apply { topMargin = if (modeEditing) dp(154) else dp(118) }
+        )
+
+        val addButton = TextView(this).apply {
+            text = "+"
+            textSize = 27f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setTextColor(if (modeEditing) 0xFFFFD54F.toInt() else Color.WHITE)
+            background = oval(0x55444444)
+            contentDescription = if (modeEditing) "Finish rearranging camera modes" else "Edit camera modes"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                modeEditing = !modeEditing
+                rebuildModeStrip()
+                showMoreModes()
+            }
+        }
+        overlay.addView(
+            addButton,
+            FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.BOTTOM).apply {
+                marginEnd = dp(18)
+                bottomMargin = dp(124)
+            }
+        )
 
         root.addView(
             overlay,
@@ -1310,6 +1217,54 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
         moreModesOverlay = overlay
+        if (modeEditing) addBottomModeDropTargets(overlay)
+    }
+
+    /**
+     * The real mode strip remains visible beneath the translucent MORE overlay.
+     * These transparent hit targets sit directly over its current labels, so
+     * drops reorder/move modes without drawing a second, artificial toolbar.
+     */
+    private fun addBottomModeDropTargets(overlay: FrameLayout) {
+        if (!modeEditing || !::modeScroll.isInitialized || !::modeLabels.isInitialized) return
+
+        overlay.post {
+            if (!modeEditing || moreModesOverlay !== overlay ||
+                modeScroll.width <= 0 || modeScroll.height <= 0
+            ) return@post
+
+            val barLocation = IntArray(2)
+            val rootLocation = IntArray(2)
+            modeScroll.getLocationOnScreen(barLocation)
+            root.getLocationOnScreen(rootLocation)
+
+            val hitLayer = FrameLayout(this)
+            val layerParams = FrameLayout.LayoutParams(
+                modeScroll.width,
+                modeScroll.height
+            ).apply {
+                leftMargin = barLocation[0] - rootLocation[0]
+                topMargin = barLocation[1] - rootLocation[1]
+            }
+            overlay.addView(hitLayer, layerParams)
+            setModeDropTarget(hitLayer, "main", null)
+
+            primaryModes.filter { it != "More" }.forEach { mode ->
+                val label = modeLabels[mode] ?: return@forEach
+                if (label.width <= 0) return@forEach
+                val target = View(this)
+                setModeDropTarget(target, "main", mode)
+                hitLayer.addView(
+                    target,
+                    FrameLayout.LayoutParams(
+                        label.width,
+                        modeScroll.height
+                    ).apply {
+                        leftMargin = label.left - modeScroll.scrollX
+                    }
+                )
+            }
+        }
     }
 
     private fun setModeDropTarget(
