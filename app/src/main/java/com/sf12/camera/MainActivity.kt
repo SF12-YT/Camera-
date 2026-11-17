@@ -635,7 +635,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val readOnly = state == Environment.MEDIA_MOUNTED_READ_ONLY
             val platformVolumeName = try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    volume.mediaStoreVolumeName ?: volume.uuid?.lowercase(Locale.US)
+                    volume.mediaStoreVolumeName
                 } else {
                     volume.uuid?.lowercase(Locale.US)
                 }
@@ -683,7 +683,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 CameraStorageLocation(
                     "__no_sd_card__",
                     "SD card",
-                    true,
+                    false,
                     false,
                     "No removable SD card detected"
                 )
