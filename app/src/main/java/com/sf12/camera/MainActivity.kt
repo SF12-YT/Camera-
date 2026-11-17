@@ -700,8 +700,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val maximumHighSpeedFps = streamMap?.highSpeedVideoFpsRanges
             ?.maxOfOrNull { it.upper } ?: 0
-        val supportsSuperSlowMo = maximumHighSpeedFps >= 480
-        val supportsSlowMo = maximumHighSpeedFps >= 120
+        val isGalaxyS10e = Build.MANUFACTURER.equals("samsung", ignoreCase = true) &&
+            Build.MODEL.startsWith("SM-G970", ignoreCase = true)
+        val supportsSuperSlowMo = maximumHighSpeedFps >= 480 || isGalaxyS10e
+        val supportsSlowMo = maximumHighSpeedFps >= 120 || isGalaxyS10e
 
         if (!supportsSuperSlowMo) {
             primaryModes.remove("Super Slow-Mo")
@@ -712,8 +714,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             moreModes.remove("Slow-Mo")
         }
 
+        // Keep the first-time More layout aligned with the Samsung Camera grid.
+        if ("Pro Video" !in primaryModes && "Pro Video" !in moreModes) {
+            moreModes.add(0, "Pro Video")
+        }
         val availableBaseModes = listOf(
-            "Portrait", "Photo", "Video", "Pro Video", "Night", "Single Take",
+            "Portrait", "Photo", "Video", "Night", "Single Take",
             "Food", "Panorama", "Hyperlapse", "Portrait Video"
         )
         availableBaseModes.forEach { mode ->
@@ -722,11 +728,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (supportsSuperSlowMo &&
             "Super Slow-Mo" !in primaryModes &&
             "Super Slow-Mo" !in moreModes
-        ) moreModes.add("Super Slow-Mo")
+        ) {
+            val insertAt = moreModes.indexOf("Hyperlapse").takeIf { it >= 0 }
+                ?: moreModes.size
+            moreModes.add(insertAt, "Super Slow-Mo")
+        }
         if (supportsSlowMo &&
             "Slow-Mo" !in primaryModes &&
             "Slow-Mo" !in moreModes
-        ) moreModes.add("Slow-Mo")
+        ) {
+            val insertAt = moreModes.indexOf("Hyperlapse").takeIf { it >= 0 }
+                ?: moreModes.size
+            moreModes.add(insertAt, "Slow-Mo")
+        }
 
         if (primaryModes.none { it != "More" }) {
             primaryModes.add(0, "Photo")
