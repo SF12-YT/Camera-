@@ -1076,7 +1076,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun showMoreModes() {
-        closeMoreModes()
+        closeMoreModes(resetEditing = false)
         val overlay = FrameLayout(this).apply {
             // 20% opaque black, leaving the viewfinder visible underneath.
             setBackgroundColor(0x33000000)
@@ -1397,10 +1397,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         showMoreModes()
     }
 
-    private fun closeMoreModes() {
+    private fun closeMoreModes(resetEditing: Boolean = true) {
         moreModesOverlay?.let { root.removeView(it) }
         moreModesOverlay = null
-        modeEditing = false
+        if (resetEditing) modeEditing = false
     }
 
     private fun showMotionPhotoInfo() {
