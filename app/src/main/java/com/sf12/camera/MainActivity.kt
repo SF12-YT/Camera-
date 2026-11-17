@@ -1879,9 +1879,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         useDefaultMargins = false
                     }
                     val cellSize = (resources.displayMetrics.widthPixels / 3).coerceAtLeast(dp(96))
-                    val shownPhotos = photos.take(180)
                     val imageViews = mutableListOf<ImageView>()
-                    shownPhotos.forEachIndexed { index, photo ->
+                    photos.forEachIndexed { index, photo ->
                         val image = ImageView(this).apply {
                             scaleType = ImageView.ScaleType.CENTER_CROP
                             setBackgroundColor(0xFF202020.toInt())
@@ -1914,42 +1913,58 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
                         )
                     )
-                    if (photos.size > shownPhotos.size) {
-                        screen.addView(TextView(this).apply {
-                            text = "Showing the ${shownPhotos.size} most recent photos"
-                            textSize = 10f
-                            gravity = Gravity.CENTER
-                            setTextColor(0xFF888888.toInt())
-                            setPadding(0, dp(4), 0, dp(8))
-                        })
+
+                    // Keep every photo in the album, but decode thumbnails only near
+                    // the visible scroll position to avoid loading the whole camera roll.
+                    val requestedThumbnails = mutableSetOf<Int>()
+                    fun loadThumbnailRange(firstIndex: Int, lastIndex: Int) {
+                        if (photos.isEmpty()) return
+                        val from = firstIndex.coerceAtLeast(0)
+                        val to = lastIndex.coerceAtMost(photos.lastIndex)
+                        if (from > to) return
+                        val indexes = synchronized(requestedThumbnails) {
+                            (from..to).filter { requestedThumbnails.add(it) }
+                        }
+                        if (indexes.isEmpty()) return
+
+                        Thread {
+                            indexes.forEach { index ->
+                                try {
+                                    val photo = photos[index]
+                                    val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                        contentResolver.loadThumbnail(
+                                            photo.uri,
+                                            Size(dp(120), dp(120)),
+                                            null
+                                        )
+                                    } else {
+                                        null
+                                    }
+                                    mainHandler.post {
+                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
+                                            if (bitmap != null) {
+                                                imageViews[index].setImageBitmap(bitmap)
+                                            } else {
+                                                imageViews[index].setImageURI(photo.uri)
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {
+                                    // Keep a neutral tile when a photo cannot be decoded.
+                                }
+                            }
+                        }.start()
                     }
 
-                    Thread {
-                        shownPhotos.forEachIndexed { index, photo ->
-                            try {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                    val bitmap = contentResolver.loadThumbnail(
-                                        photo.uri,
-                                        Size(dp(180), dp(180)),
-                                        null
-                                    )
-                                    mainHandler.post {
-                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
-                                            imageViews[index].setImageBitmap(bitmap)
-                                        }
-                                    }
-                                } else {
-                                    mainHandler.post {
-                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
-                                            imageViews[index].setImageURI(photo.uri)
-                                        }
-                                    }
-                                }
-                            } catch (_: Exception) {
-                                // Keep a neutral tile when a photo cannot be decoded.
-                            }
-                        }
-                    }.start()
+                    scroll.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                        val firstVisibleRow = (scrollY / cellSize).coerceAtLeast(0)
+                        val lastVisibleRow = ((scrollY + scroll.height) / cellSize) + 3
+                        loadThumbnailRange(firstVisibleRow * 3, (lastVisibleRow + 1) * 3 - 1)
+                    }
+                    scroll.post {
+                        val initialRows = (scroll.height / cellSize) + 4
+                        loadThumbnailRange(0, initialRows * 3 - 1)
+                    }
                 }
 
                 overlay.addView(
