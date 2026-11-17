@@ -2100,10 +2100,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
             // Gallery3D reads the bucketId parameter and mediaTypes extra
             // to build the album, including both photos and videos.
-            // Match Android Gallery's own album-launch contract:
-            // INTERNAL_CONTENT_URI + bucketId, with image|video flags = 1|4.
-            MediaStore.Images.Media.INTERNAL_CONTENT_URI.buildUpon()
+            // Android Camera launches Gallery albums through the external
+            // images collection. Gallery3D variants either read mediaTypes
+            // from the URI or from the intent extras, so provide both.
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI.buildUpon()
                 .appendQueryParameter("bucketId", bucketId)
+                .appendQueryParameter("mediaTypes", "5")
                 .build()
         } catch (_: Exception) {
             null
@@ -2123,36 +2125,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val galleryPackage = "com.sec.android.gallery3d"
         val albumUri = findCameraAlbumUri()
-        try {
-            if (albumUri != null) {
-                startActivity(
-                    Intent(Intent.ACTION_VIEW, albumUri).apply {
-                        component = ComponentName(
-                            galleryPackage,
-                            "com.sec.android.gallery3d.app.GalleryActivity"
-                        )
-                        putExtra("windowTitle", "Camera")
-                        // Gallery3D uses bit flags: images (1) + videos (4).
-                        putExtra("mediaTypes", 5)
-                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    }
-                )
+        if (albumUri == null) {
+            val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
+            if (launchIntent != null) {
+                startActivity(launchIntent)
             } else {
-                val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
-                if (launchIntent != null) {
-                    startActivity(launchIntent)
-                } else {
-                    Toast.makeText(
-                        this,
-                        "Samsung Gallery isn't available on this device.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+                Toast.makeText(
+                    this,
+                    "Samsung Gallery isn't available on this device.",
+                    Toast.LENGTH_LONG
+                ).show()
             }
+            return
+        }
+
+        // Let Samsung Gallery's own intent filter select its album viewer.
+        // Do not pin GalleryActivity/GalleryOpaqueActivity: Samsung firmware
+        // versions route these intents differently.
+        val galleryIntent = Intent(Intent.ACTION_VIEW, albumUri).apply {
+            setPackage(galleryPackage)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("windowTitle", "Camera")
+            // Gallery3D flags: INCLUDE_IMAGES (1) | INCLUDE_VIDEOS (4).
+            putExtra("mediaTypes", 5)
+        }
+
+        try {
+            startActivity(galleryIntent)
         } catch (_: Exception) {
-            // If the album-specific activity is unavailable, fall back to
-            // the installed Samsung Gallery app rather than rendering our
-            // own imitation gallery or opening a random single photo.
+            // The album route is the primary path. If this firmware exposes
+            // no matching VIEW activity, open the installed Gallery app.
             try {
                 val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
                 if (launchIntent != null) {
