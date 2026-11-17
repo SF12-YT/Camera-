@@ -663,7 +663,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val selectedIndex = locations.indexOfFirst { it.volumeName == selectedVolume }
             .coerceAtLeast(0)
         val labels = locations.map { location ->
-            "\${location.label}  ·  DCIM/Camera"
+            "${location.label}  ·  DCIM/Camera"
         }.toTypedArray()
 
         AlertDialog.Builder(this)
@@ -678,7 +678,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 loadLatestCameraThumbnail()
                 Toast.makeText(
                     this,
-                    "Saving to \${location.label}/DCIM/Camera",
+                    "Saving to ${location.label}/DCIM/Camera",
                     Toast.LENGTH_SHORT
                 ).show()
                 dialog.dismiss()
@@ -1687,16 +1687,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val selection: String
             val selectionArgs: Array<String>
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                selection = "(\${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
-                    "\${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
-                    "\${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
+                selection = "(${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
+                    "${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
+                    "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
                 selectionArgs = arrayOf(
                     Environment.DIRECTORY_DCIM + "/Camera",
                     Environment.DIRECTORY_DCIM + "/Camera/",
                     Environment.DIRECTORY_DCIM + "/Camera/%"
                 )
             } else {
-                selection = "\${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+                selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
                 selectionArgs = arrayOf("Camera")
             }
 
@@ -1705,9 +1705,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 projection,
                 selection,
                 selectionArgs,
-                "\${MediaStore.Images.Media.DATE_ADDED} DESC, " +
-                    "\${MediaStore.Images.Media.DATE_MODIFIED} DESC, " +
-                    "\${MediaStore.Images.Media._ID} DESC"
+                "${MediaStore.Images.Media.DATE_ADDED} DESC, " +
+                    "${MediaStore.Images.Media.DATE_MODIFIED} DESC, " +
+                    "${MediaStore.Images.Media._ID} DESC"
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val id = cursor.getLong(
