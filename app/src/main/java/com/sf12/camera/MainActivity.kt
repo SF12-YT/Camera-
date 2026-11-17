@@ -1713,7 +1713,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 canvas.drawText(
                     ratioLabel,
                     width / 2f,
-                    height - dp(12f),
+                    (height - dp(12f)).toFloat(),
                     labelPaint
                 )
             }
