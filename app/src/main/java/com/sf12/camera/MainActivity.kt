@@ -2100,7 +2100,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
             // Gallery3D reads the bucketId parameter and mediaTypes extra
             // to build the album, including both photos and videos.
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI.buildUpon()
+            // Match Android Gallery's own album-launch contract:
+            // INTERNAL_CONTENT_URI + bucketId, with image|video flags = 1|4.
+            MediaStore.Images.Media.INTERNAL_CONTENT_URI.buildUpon()
                 .appendQueryParameter("bucketId", bucketId)
                 .build()
         } catch (_: Exception) {
@@ -2130,8 +2132,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             "com.sec.android.gallery3d.app.GalleryActivity"
                         )
                         putExtra("windowTitle", "Camera")
-                        // Gallery3D uses bit flags: images (1) + videos (2).
-                        putExtra("mediaTypes", 3)
+                        // Gallery3D uses bit flags: images (1) + videos (4).
+                        putExtra("mediaTypes", 5)
                         addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     }
                 )
