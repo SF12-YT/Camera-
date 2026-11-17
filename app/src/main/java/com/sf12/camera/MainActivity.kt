@@ -710,7 +710,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     aspectRatio = selected
                     getSharedPreferences("camera_settings", MODE_PRIVATE)
                         .edit().putString("photo_ratio", selected).apply()
-                    aspectButton.text = selected
                     updateRatioChrome()
                     recreateImageReaderAndSession()
                 }
