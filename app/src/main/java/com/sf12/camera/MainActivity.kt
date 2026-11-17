@@ -1338,6 +1338,57 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private fun startModeDrag(view: View, mode: String, sourceGroup: String): Boolean {
+        val payload = ModeDragPayload(mode, sourceGroup)
+        val clip = ClipData.newPlainText("camera-mode", mode)
+        @Suppress("DEPRECATION")
+        return view.startDrag(clip, createModeDragShadow(mode), payload, 0)
+    }
+
+    private fun createModeDragShadow(mode: String): View.DragShadowBuilder {
+        val cardWidth = dp(108)
+        val cardHeight = dp(104)
+        val preview = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(6), dp(6), dp(5))
+            background = rounded(Color.WHITE, 14)
+            elevation = dp(5).toFloat()
+            addView(
+                CameraIconButton(
+                    this@MainActivity,
+                    "mode:$mode",
+                    0xFF151515.toInt()
+                ) { }.apply {
+                    isClickable = false
+                    isFocusable = false
+                    background = null
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(52)
+                )
+            )
+            addView(TextView(this@MainActivity).apply {
+                text = mode.uppercase(Locale.ROOT)
+                textSize = 11.5f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                isSingleLine = true
+                setTextColor(0xFF171717.toInt())
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(26)
+            ))
+        }
+        preview.measure(
+            View.MeasureSpec.makeMeasureSpec(cardWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(cardHeight, View.MeasureSpec.EXACTLY)
+        )
+        preview.layout(0, 0, cardWidth, cardHeight)
+        return View.DragShadowBuilder(preview)
+    }
+
     private fun createTaskbarModeChip(mode: String): View {
         val chip = TextView(this).apply {
             text = mode.uppercase(Locale.ROOT)
@@ -1553,7 +1604,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         description: String,
         action: () -> Unit
     ): CameraIconButton {
-        return CameraIconButton(this, icon, action).apply {
+        return CameraIconButton(this, icon, onPressed = action).apply {
             contentDescription = description
         }
     }
@@ -2693,8 +2744,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private inner class CameraIconButton(
         context: Context,
         private val icon: String,
-        private val onPressed: () -> Unit,
-        private val iconColorOverride: Int? = null
+        private val iconColorOverride: Int? = null,
+        private val onPressed: () -> Unit
     ) : View(context) {
 
         private val strokePaint = android.graphics.Paint(
