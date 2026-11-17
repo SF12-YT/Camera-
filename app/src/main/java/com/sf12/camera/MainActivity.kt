@@ -1604,75 +1604,49 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun cameraAlbumUriForLatestPhoto(): Uri? {
-        val latestPhotoUri = findLatestCameraPhotoUri() ?: lastPhotoUri ?: return null
-        return try {
-            val bucketId = contentResolver.query(
-                latestPhotoUri,
-                arrayOf(MediaStore.Images.Media.BUCKET_ID),
-                null,
-                null,
-                null
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    cursor.getString(
-                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
-                    )
-                } else null
-            } ?: return null
-
-            // GalleryActivity treats a cursor-directory URI with bucketId as
-            // an album grid. Passing an image item URI instead opens one photo.
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI.buildUpon()
-                .appendQueryParameter("bucketId", bucketId)
-                .build()
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     private fun openLastPhoto() {
         if (!hasGalleryReadPermission()) {
             requestGalleryReadPermission()
-            Toast.makeText(this, "Allow photo access to open the Camera album.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Allow photo access to open the latest camera photo.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val cameraAlbumUri = cameraAlbumUriForLatestPhoto()
-        if (cameraAlbumUri == null) {
-            Toast.makeText(this, "Couldn't find the Camera album in MediaStore.", Toast.LENGTH_SHORT).show()
+        val latestPhotoUri = findLatestCameraPhotoUri() ?: lastPhotoUri
+        if (latestPhotoUri == null) {
+            Toast.makeText(this, "No camera photos yet.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val galleryIntent = Intent(Intent.ACTION_VIEW).apply {
+        // Keep the original MediaStore item URI: Samsung Gallery handles the
+        // Camera roll from this URI on the S10e. Do not synthesize a bucket URI
+        // or a Samsung-private secmedia ID from MediaStore's _ID.
+        val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
             setComponent(
                 ComponentName(
                     "com.sec.android.gallery3d",
                     "com.sec.android.gallery3d.app.GalleryActivity"
                 )
             )
-            setDataAndType(
-                cameraAlbumUri,
-                "vnd.android.cursor.dir/image"
-            )
-            putExtra("mediaTypes", 1)
-            putExtra("windowTitle", "Camera")
+            setDataAndType(latestPhotoUri, "image/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
         try {
-            startActivity(galleryIntent)
+            startActivity(samsungIntent)
+            return
         } catch (_: Exception) {
-            // Try Android's default gallery handler with the same album URI.
-            try {
-                startActivity(
-                    Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(cameraAlbumUri, "vnd.android.cursor.dir/image")
-                        putExtra("mediaTypes", 1)
-                    }
-                )
-            } catch (_: Exception) {
-                Toast.makeText(this, "Couldn't open the Camera album.", Toast.LENGTH_SHORT).show()
-            }
+            // Try the same valid item URI with Android's default image viewer.
+        }
+
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(latestPhotoUri, "image/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            )
+        } catch (_: Exception) {
+            Toast.makeText(this, "Couldn't open the latest camera photo.", Toast.LENGTH_SHORT).show()
         }
     }
 
