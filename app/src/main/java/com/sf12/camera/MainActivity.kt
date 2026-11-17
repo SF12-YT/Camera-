@@ -2281,6 +2281,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     // the visible scroll position to avoid loading the whole camera roll.
                     val requestedThumbnails = mutableSetOf<Int>()
                     val thumbnailRetryCounts = mutableMapOf<Int, Int>()
+                    var scheduleThumbnailRetry: ((Int) -> Unit)? = null
+
                     fun loadThumbnailRange(firstIndex: Int, lastIndex: Int) {
                         if (photos.isEmpty()) return
                         val from = firstIndex.coerceAtLeast(0)
@@ -2293,45 +2295,53 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
                         Thread {
                             indexes.forEach { index ->
-                                try {
-                                    val photo = photos[index]
-                                    val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                        contentResolver.loadThumbnail(
+                                val photo = photos[index]
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    try {
+                                        val bitmap = contentResolver.loadThumbnail(
                                             photo.uri,
                                             Size(dp(120), dp(120)),
                                             null
                                         )
-                                    } else {
-                                        null
-                                    }
-                                    if (bitmap != null) {
                                         mainHandler.post {
                                             if (cameraRollOverlay === overlay && index < imageViews.size) {
                                                 imageViews[index].setImageBitmap(bitmap)
                                             }
                                         }
-                                    } else {
-                                        throw IllegalStateException("MediaStore returned no thumbnail")
+                                    } catch (_: Exception) {
+                                        scheduleThumbnailRetry?.invoke(index)
                                     }
-                                } catch (_: Exception) {
-                                    val retry = synchronized(requestedThumbnails) {
-                                        val attempts = (thumbnailRetryCounts[index] ?: 0) + 1
-                                        thumbnailRetryCounts[index] = attempts
-                                        if (attempts <= 2) requestedThumbnails.remove(index)
-                                        attempts
-                                    }
-                                    if (retry <= 2) {
-                                        mainHandler.postDelayed({
-                                            if (cameraRollOverlay === overlay) {
-                                                loadThumbnailRange(index, index)
+                                } else {
+                                    // Keep the legacy path working on Android 8/9,
+                                    // where ContentResolver.loadThumbnail is unavailable.
+                                    mainHandler.post {
+                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
+                                            try {
+                                                imageViews[index].setImageURI(photo.uri)
+                                            } catch (_: Exception) {
+                                                scheduleThumbnailRetry?.invoke(index)
                                             }
-                                        }, 500L * retry)
-                                    } else {
-                                        // Leave the tile neutral after the bounded retries.
+                                        }
                                     }
                                 }
                             }
                         }.start()
+                    }
+
+                    scheduleThumbnailRetry = { index ->
+                        val retry = synchronized(requestedThumbnails) {
+                            val attempts = (thumbnailRetryCounts[index] ?: 0) + 1
+                            thumbnailRetryCounts[index] = attempts
+                            if (attempts <= 2) requestedThumbnails.remove(index)
+                            attempts
+                        }
+                        if (retry <= 2) {
+                            mainHandler.postDelayed({
+                                if (cameraRollOverlay === overlay) {
+                                    loadThumbnailRange(index, index)
+                                }
+                            }, 500L * retry)
+                        }
                     }
 
                     scroll.setOnScrollChangeListener { _, _, scrollY, _, _ ->
