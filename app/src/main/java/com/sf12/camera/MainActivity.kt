@@ -406,8 +406,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         shutterRow.addView(shutterButton, LinearLayout.LayoutParams(dp(82), dp(82)))
 
         val switchContainer = FrameLayout(this)
+        val switchContainer = FrameLayout(this)
         val switchSlot = FrameLayout(this).apply {
             background = oval(0x55333333)
+            isClickable = false
         }
         val switchIcon = CameraIconButton(this, "flip") { switchCamera() }.apply {
             contentDescription = "Switch camera"
@@ -421,8 +423,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 Gravity.CENTER
             )
         )
-        shutterRow.addView(
+        switchContainer.addView(
             switchSlot,
+            FrameLayout.LayoutParams(dp(62), dp(62), Gravity.CENTER)
+        )
+        shutterRow.addView(
+            switchContainer,
             LinearLayout.LayoutParams(0, dp(82), 1f)
         )
         bottomPanel.addView(
@@ -1707,7 +1713,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 canvas.drawText(
                     ratioLabel,
                     width / 2f,
-                    height - dp(4f),
+                    height - dp(12f),
                     labelPaint
                 )
             }
