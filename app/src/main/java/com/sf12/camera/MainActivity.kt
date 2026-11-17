@@ -742,7 +742,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val storageSpinner = android.widget.Spinner(this, android.widget.Spinner.MODE_DROPDOWN).apply {
             background = rounded(0xFF202020.toInt(), 12, 0xFF444444.toInt())
-            popupBackground = rounded(0xFF202020.toInt(), 10)
+            setPopupBackgroundDrawable(rounded(0xFF202020.toInt(), 10))
             dropDownVerticalOffset = dp(4)
             dropDownWidth = FrameLayout.LayoutParams.MATCH_PARENT
             setPadding(dp(12), 0, dp(12), 0)
@@ -1053,10 +1053,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (modeEditing && mode != "More") {
                     contentDescription = "Hold and drag $mode"
                     setOnLongClickListener {
-                        val payload = ModeDragPayload(mode, "main")
-                        val clip = ClipData.newPlainText("camera-mode", mode)
-                        @Suppress("DEPRECATION")
-                        it.startDrag(clip, View.DragShadowBuilder(it), payload, 0)
+                        startModeDrag(it, mode, "main")
                     }
                     setModeDropTarget(this, "main", mode)
                 }
@@ -1185,29 +1182,56 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             ).apply { topMargin = if (modeEditing) dp(154) else dp(118) }
         )
 
-        val addButton = TextView(this).apply {
-            text = "+"
-            textSize = 27f
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-            setTextColor(if (modeEditing) 0xFFFFD54F.toInt() else Color.WHITE)
-            background = oval(0x55444444)
-            contentDescription = if (modeEditing) "Finish rearranging camera modes" else "Edit camera modes"
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                modeEditing = !modeEditing
-                rebuildModeStrip()
-                showMoreModes()
+        if (modeEditing) {
+            val saveButton = TextView(this).apply {
+                text = "Save"
+                textSize = 17f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                setTextColor(Color.WHITE)
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(28), 0, dp(28), 0)
+                setOnClickListener {
+                    modeEditing = false
+                    saveCameraModeConfiguration()
+                    rebuildModeStrip()
+                    showMoreModes()
+                }
             }
+            overlay.addView(
+                saveButton,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    dp(48),
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                ).apply { bottomMargin = dp(72) }
+            )
+        } else {
+            val addButton = TextView(this).apply {
+                text = "+"
+                textSize = 27f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                setTextColor(Color.WHITE)
+                background = oval(0x55444444)
+                contentDescription = "Edit camera modes"
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    modeEditing = true
+                    rebuildModeStrip()
+                    showMoreModes()
+                }
+            }
+            overlay.addView(
+                addButton,
+                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.BOTTOM).apply {
+                    marginEnd = dp(18)
+                    bottomMargin = dp(124)
+                }
+            )
         }
-        overlay.addView(
-            addButton,
-            FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.BOTTOM).apply {
-                marginEnd = dp(18)
-                bottomMargin = dp(124)
-            }
-        )
 
         root.addView(
             overlay,
@@ -1272,12 +1296,41 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         destinationGroup: String,
         targetMode: String?
     ) {
-        view.setOnDragListener { _, event ->
+        view.setOnDragListener { target, event ->
+            val payload = event.localState as? ModeDragPayload
             when (event.action) {
-                DragEvent.ACTION_DRAG_STARTED -> event.localState is ModeDragPayload
+                DragEvent.ACTION_DRAG_STARTED -> {
+                    if (payload != null &&
+                        payload.sourceGroup == destinationGroup &&
+                        payload.mode == targetMode
+                    ) {
+                        target.alpha = 0.14f
+                    }
+                    payload != null
+                }
+                DragEvent.ACTION_DRAG_ENTERED -> {
+                    if (payload != null &&
+                        !(payload.sourceGroup == destinationGroup && payload.mode == targetMode)
+                    ) {
+                        target.alpha = 0.55f
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_EXITED -> {
+                    target.alpha = if (
+                        payload != null &&
+                        payload.sourceGroup == destinationGroup &&
+                        payload.mode == targetMode
+                    ) 0.14f else 1f
+                    true
+                }
                 DragEvent.ACTION_DROP -> {
-                    val payload = event.localState as? ModeDragPayload
+                    target.alpha = 1f
                     if (payload != null) moveCameraMode(payload, destinationGroup, targetMode)
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    target.alpha = 1f
                     true
                 }
                 else -> true
@@ -1298,10 +1351,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isFocusable = true
             contentDescription = "Drag $mode to rearrange camera modes"
             setOnLongClickListener {
-                val payload = ModeDragPayload(mode, "main")
-                val clip = ClipData.newPlainText("camera-mode", mode)
-                @Suppress("DEPRECATION")
-                it.startDrag(clip, View.DragShadowBuilder(it), payload, 0)
+                startModeDrag(it, mode, "main")
             }
         }
         setModeDropTarget(chip, "main", mode)
@@ -1351,10 +1401,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (editing) {
             tile.contentDescription = "Drag $mode to rearrange camera modes"
             tile.setOnLongClickListener {
-                val payload = ModeDragPayload(mode, group)
-                val clip = ClipData.newPlainText("camera-mode", mode)
-                @Suppress("DEPRECATION")
-                tile.startDrag(clip, View.DragShadowBuilder(tile), payload, 0)
+                startModeDrag(tile, mode, group)
             }
             setModeDropTarget(tile, group, mode)
         } else {
@@ -2646,7 +2693,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private inner class CameraIconButton(
         context: Context,
         private val icon: String,
-        private val onPressed: () -> Unit
+        private val onPressed: () -> Unit,
+        private val iconColorOverride: Int? = null
     ) : View(context) {
 
         private val strokePaint = android.graphics.Paint(
@@ -2704,7 +2752,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "ratio_full" -> aspectRatio == "Full"
                 else -> false
             }
-            strokePaint.color = if (highlighted) yellow else Color.WHITE
+            strokePaint.color = iconColorOverride ?: if (highlighted) yellow else Color.WHITE
             strokePaint.strokeWidth = 1.55f
 
             if (icon.startsWith("mode:")) {
@@ -2997,14 +3045,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     canvas.drawCircle(12f, 12f, 1.2f, p)
                 }
                 "Food" -> {
-                    // Plate with the fork and spoon beside it.
-                    canvas.drawCircle(12f, 12f, 8.1f, p)
-                    canvas.drawLine(3f, 4f, 3f, 20f, p)
-                    canvas.drawLine(1.8f, 4f, 1.8f, 9f, p)
-                    canvas.drawLine(4.2f, 4f, 4.2f, 9f, p)
-                    canvas.drawLine(1.8f, 9f, 4.2f, 9f, p)
-                    canvas.drawLine(21f, 4f, 21f, 20f, p)
-                    canvas.drawCircle(21f, 5.5f, 1.3f, p)
+                    // Samsung's plate with fork and spoon contained inside the ring.
+                    canvas.drawCircle(12f, 12f, 8.9f, p)
+                    canvas.drawLine(8.4f, 7f, 8.4f, 17f, p)
+                    canvas.drawLine(6.7f, 7f, 6.7f, 10.2f, p)
+                    canvas.drawLine(10.1f, 7f, 10.1f, 10.2f, p)
+                    canvas.drawLine(6.7f, 10.2f, 10.1f, 10.2f, p)
+                    canvas.drawArc(android.graphics.RectF(13.1f, 6.5f, 17.6f, 11.8f), 180f, 180f, false, p)
+                    canvas.drawLine(15.35f, 11.8f, 15.35f, 17.2f, p)
                 }
                 "Panorama" -> {
                     // Open panoramic frame with bowed upper and lower edges.
@@ -3031,22 +3079,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     canvas.drawCircle(12f, 12f, 1f, p)
                 }
                 "Hyperlapse" -> {
-                    canvas.drawCircle(12f, 12f, 8.5f, p)
-                    canvas.drawLine(5.5f, 9.3f, 18.5f, 9.3f, p)
-                    canvas.drawLine(5.5f, 12f, 16f, 12f, p)
-                    canvas.drawLine(5.5f, 14.7f, 18.5f, 14.7f, p)
-                    canvas.drawCircle(18f, 12f, 1.1f, p)
+                    // A speed-lapse disc with three short horizontal motion lines.
+                    canvas.drawOval(android.graphics.RectF(2.5f, 4.2f, 21.5f, 19.8f), p)
+                    canvas.drawLine(6f, 9f, 17.5f, 9f, p)
+                    canvas.drawLine(5f, 12f, 15.5f, 12f, p)
+                    canvas.drawLine(6f, 15f, 17.5f, 15f, p)
+                    canvas.drawCircle(18f, 12f, 1.2f, p)
                 }
                 "Portrait Video" -> {
-                    canvas.drawCircle(9.7f, 8.5f, 3.1f, p)
-                    canvas.drawArc(android.graphics.RectF(3.2f, 12f, 16.2f, 24.2f), 195f, 150f, false, p)
-                    canvas.drawArc(android.graphics.RectF(12f, 10.5f, 23f, 21.5f), 300f, 300f, false, p)
-                    val play = android.graphics.Path().apply {
-                        moveTo(18f, 13f)
-                        lineTo(21f, 15f)
-                        lineTo(18f, 17f)
-                    }
-                    canvas.drawPath(play, p)
+                    // Person silhouette and compact video-camera mark.
+                    canvas.drawCircle(9.1f, 7.5f, 3.2f, p)
+                    canvas.drawArc(android.graphics.RectF(2.8f, 11f, 15.4f, 23.7f), 195f, 150f, false, p)
+                    canvas.drawArc(android.graphics.RectF(13.1f, 10f, 22.6f, 19.4f), 300f, 300f, false, p)
+                    canvas.drawCircle(17.8f, 14.7f, 1.2f, p)
+                    canvas.drawLine(19.3f, 17.7f, 22f, 20.2f, p)
                 }
                 "Portrait" -> {
                     canvas.drawCircle(12f, 7.5f, 3.2f, p)
