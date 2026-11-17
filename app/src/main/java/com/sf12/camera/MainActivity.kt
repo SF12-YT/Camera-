@@ -29,6 +29,8 @@ import android.provider.MediaStore
 import android.util.Range
 import android.util.Size
 import android.view.Gravity
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
@@ -53,6 +55,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var previewView: TextureView
     private lateinit var topPanel: LinearLayout
     private lateinit var bottomPanel: LinearLayout
+    private lateinit var topGradientView: View
+    private lateinit var bottomGradientView: View
     private lateinit var quickControls: LinearLayout
     private lateinit var zoomRow: LinearLayout
     private lateinit var modeScroll: HorizontalScrollView
@@ -64,10 +68,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var flashButton: TextView
     private lateinit var aspectButton: TextView
     private lateinit var timerButton: TextView
+    private lateinit var motionPhotoButton: TextView
+    private lateinit var filterButton: TextView
     private lateinit var galleryThumbnail: ImageView
+    private lateinit var galleryPlaceholder: TextView
     private lateinit var shutterButton: FrameLayout
     private lateinit var modeLabels: Map<String, TextView>
     private lateinit var scaleGestureDetector: ScaleGestureDetector
+    private lateinit var gestureDetector: GestureDetector
 
     private val cameraManager by lazy { getSystemService(Context.CAMERA_SERVICE) as CameraManager }
     private var cameraDevice: CameraDevice? = null
@@ -84,11 +92,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var lensFacing = CameraCharacteristics.LENS_FACING_BACK
     private var activeTab = "Basic"
     private var activeMode = "Photo"
+    private var activePrimaryMode = "Photo"
     private var flashMode = 0 // 0 = Auto, 1 = On, 2 = Off
     private var timerSeconds = 0
     private var aspectRatio = "3:4"
     private var zoomRatio = 1.0f
     private var zoomLevels = listOf(1.0f)
+    private var selectedEffectMode = CaptureRequest.CONTROL_EFFECT_MODE_OFF
+    private var gestureHadMultiplePointers = false
+    private val primaryModes = listOf("Portrait", "Photo", "Video", "More")
     private var lastPhotoUri: Uri? = null
     private var openingCamera = false
     private var capturePending = false
@@ -110,11 +122,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
 
-        activeTab = getSharedPreferences("camera_settings", MODE_PRIVATE)
-            .getString("camera_profile", "Basic") ?: "Basic"
+        val preferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
+        activeTab = preferences.getString("camera_profile", "Basic") ?: "Basic"
         if (activeTab !in listOf("Basic", "Pro", "Advanced", "Astrophotography")) {
             activeTab = "Basic"
         }
+        aspectRatio = preferences.getString("photo_ratio", "3:4") ?: "3:4"
         buildCameraUi()
     }
 
@@ -152,14 +165,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
 
-        val topGradient = View(this).apply {
+        topGradientView = View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(0xCC000000.toInt(), 0x55000000, Color.TRANSPARENT)
             )
         }
         root.addView(
-            topGradient,
+            topGradientView,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 dp(190),
@@ -167,14 +180,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
 
-        val bottomGradient = View(this).apply {
+        bottomGradientView = View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
                 intArrayOf(0xE6000000.toInt(), 0x77000000, Color.TRANSPARENT)
             )
         }
         root.addView(
-            bottomGradient,
+            bottomGradientView,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 dp(300),
@@ -185,31 +198,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         topPanel = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), dp(10), dp(18), 0)
+            setPadding(dp(12), dp(9), dp(12), 0)
         }
-        settingsButton = TextView(this).apply {
-            text = "⚙"
+        settingsButton = quickControl("⚙") { showSettings() }.apply {
             textSize = 24f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            contentDescription = "Camera settings"
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { showSettings() }
+            contentDescription = "Settings"
         }
-        topPanel.addView(settingsButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        topPanel.addView(settingsButton, LinearLayout.LayoutParams(0, dp(48), 1f))
 
         quickControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        flashButton = quickControl("⚡") { cycleFlash() }
-        timerButton = quickControl("◷") { cycleTimer() }
-        aspectButton = quickControl("3:4") { showAspectRatioPicker() }
-        quickControls.addView(flashButton, weightedControl())
-        quickControls.addView(timerButton, weightedControl())
-        quickControls.addView(aspectButton, weightedControl())
-        topPanel.addView(quickControls, LinearLayout.LayoutParams(0, dp(48), 1f))
+        flashButton = quickControl("⚡") { cycleFlash() }.apply {
+            contentDescription = "Flash auto"
+        }
+        timerButton = quickControl("◷") { cycleTimer() }.apply {
+            contentDescription = "Timer off"
+        }
+        aspectButton = quickControl(aspectRatio) { showAspectRatioPicker() }.apply {
+            contentDescription = "Photo size"
+        }
+        motionPhotoButton = quickControl("▣") { showMotionPhotoInfo() }.apply {
+            contentDescription = "Motion photo"
+        }
+        filterButton = quickControl("✧") { showFilterPicker() }.apply {
+            contentDescription = "Filters"
+        }
+        listOf(flashButton, timerButton, aspectButton, motionPhotoButton, filterButton).forEach { control ->
+            quickControls.addView(control, weightedControl())
+        }
+        topPanel.addView(quickControls, LinearLayout.LayoutParams(0, dp(48), 5f))
         root.addView(
             topPanel,
             FrameLayout.LayoutParams(
@@ -253,7 +272,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             gravity = Gravity.CENTER
         }
         val labels = mutableMapOf<String, TextView>()
-        listOf("Portrait", "Photo", "Video", "Night").forEach { mode ->
+        primaryModes.forEach { mode ->
             val label = TextView(this).apply {
                 text = mode.uppercase(Locale.ROOT)
                 textSize = 13f
@@ -314,6 +333,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             galleryThumbnail,
             FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
         )
+        galleryPlaceholder = TextView(this).apply {
+            text = "▣"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            isClickable = false
+        }
+        gallerySlot.addView(
+            galleryPlaceholder,
+            FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
+        )
         shutterRow.addView(gallerySlot, LinearLayout.LayoutParams(0, dp(82), 1f))
 
         shutterButton = FrameLayout(this).apply {
@@ -330,6 +360,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
         shutterRow.addView(shutterButton, LinearLayout.LayoutParams(dp(82), dp(82)))
 
+        val switchContainer = FrameLayout(this)
         val switchSlot = FrameLayout(this).apply {
             background = oval(0x55333333)
             isClickable = true
@@ -350,7 +381,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
-        shutterRow.addView(switchSlot, LinearLayout.LayoutParams(0, dp(62), 1f))
+        switchContainer.addView(
+            switchSlot,
+            FrameLayout.LayoutParams(dp(62), dp(62), Gravity.CENTER)
+        )
+        shutterRow.addView(
+            switchContainer,
+            LinearLayout.LayoutParams(0, dp(82), 1f)
+        )
         bottomPanel.addView(
             shutterRow,
             LinearLayout.LayoutParams(
@@ -393,15 +431,60 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }
         )
+        gestureDetector = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(event: MotionEvent): Boolean = true
+
+                override fun onFling(
+                    first: MotionEvent?,
+                    last: MotionEvent,
+                    velocityX: Float,
+                    velocityY: Float
+                ): Boolean {
+                    if (first == null || gestureHadMultiplePointers ||
+                        first.pointerCount > 1 || last.pointerCount > 1
+                    ) return false
+
+                    val deltaX = last.x - first.x
+                    val deltaY = last.y - first.y
+                    if (abs(deltaX) > abs(deltaY) && abs(deltaX) > dp(65) &&
+                        abs(velocityX) > dp(180)
+                    ) {
+                        val current = primaryModes.indexOf(activePrimaryMode).coerceAtLeast(0)
+                        val direction = if (deltaX > 0) 1 else -1
+                        val next = (current + direction + primaryModes.size) % primaryModes.size
+                        selectMode(primaryModes[next])
+                        return true
+                    }
+                    if (abs(deltaY) > abs(deltaX) && abs(deltaY) > dp(75) &&
+                        abs(velocityY) > dp(180)
+                    ) {
+                        switchCamera()
+                        return true
+                    }
+                    return false
+                }
+            }
+        )
         previewView.setOnTouchListener { _, event ->
+            if (event.pointerCount > 1) gestureHadMultiplePointers = true
             scaleGestureDetector.onTouchEvent(event)
+            gestureDetector.onTouchEvent(event)
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) {
+                gestureHadMultiplePointers = false
+            }
             true
         }
 
         selectMode("Photo")
         updateFlashButton()
         updateTimerButton()
+        updateFilterButton()
         setZoomButtons()
+        updateRatioChrome()
         selectTab(activeTab)
         setContentView(root)
     }
@@ -447,20 +530,122 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun selectMode(mode: String) {
-        if (mode != "Photo") {
-            Toast.makeText(this, "$mode mode is planned for a later build.", Toast.LENGTH_SHORT).show()
+        if (mode !in primaryModes) return
+        activePrimaryMode = mode
+        if (mode == "More") {
+            updatePrimaryModeLabels()
+            showMoreModes()
             return
         }
+
         activeMode = mode
+        updatePrimaryModeLabels()
+        if (mode != "Photo") {
+            Toast.makeText(this, "$mode mode is not implemented yet.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun updatePrimaryModeLabels() {
         if (!::modeLabels.isInitialized) return
         modeLabels.forEach { (label, view) ->
-            val selected = label == mode
+            val selected = label == activePrimaryMode
             view.setTextColor(if (selected) Color.WHITE else 0xFFBDBDBD.toInt())
             view.setTypeface(
                 null,
                 if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
             )
             view.background = if (selected) rounded(0xFF303030.toInt(), 100) else null
+        }
+    }
+
+    private fun showMoreModes() {
+        val modes = mutableListOf(
+            "Night",
+            "Single Take",
+            "Food",
+            "Panorama"
+        )
+        val characteristics = cameraCharacteristics
+        val streamMap = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val maximumHighSpeedFps = streamMap?.highSpeedVideoFpsRanges
+            ?.maxOfOrNull { it.upper } ?: 0
+        if (maximumHighSpeedFps >= 480) modes.add("Super Slow-Mo")
+        if (maximumHighSpeedFps >= 120) modes.add("Slow-Mo")
+        modes.add("Hyperlapse")
+        modes.add("Portrait Video")
+
+        AlertDialog.Builder(this)
+            .setTitle("More camera modes")
+            .setItems(modes.toTypedArray()) { _, which ->
+                activeMode = modes[which]
+                activePrimaryMode = "More"
+                updatePrimaryModeLabels()
+                Toast.makeText(
+                    this,
+                    "${activeMode} is not implemented in this build yet.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showMotionPhotoInfo() {
+        AlertDialog.Builder(this)
+            .setTitle("Motion Photo")
+            .setMessage("Motion Photo capture is not implemented yet. The control is shown here to match the Samsung Camera layout.")
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun availableEffects(): List<Pair<Int, String>> {
+        val supported = cameraCharacteristics
+            ?.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS)
+            ?.toSet().orEmpty()
+        return listOf(
+            CaptureRequest.CONTROL_EFFECT_MODE_OFF to "Original",
+            CaptureRequest.CONTROL_EFFECT_MODE_MONO to "Mono",
+            CaptureRequest.CONTROL_EFFECT_MODE_NEGATIVE to "Negative",
+            CaptureRequest.CONTROL_EFFECT_MODE_SOLARIZE to "Solarize",
+            CaptureRequest.CONTROL_EFFECT_MODE_SEPIA to "Sepia",
+            CaptureRequest.CONTROL_EFFECT_MODE_POSTERIZE to "Posterize",
+            CaptureRequest.CONTROL_EFFECT_MODE_AQUA to "Aqua"
+        ).filter { it.first == CaptureRequest.CONTROL_EFFECT_MODE_OFF || supported.contains(it.first) }
+    }
+
+    private fun showFilterPicker() {
+        val effects = availableEffects()
+        if (effects.size <= 1) {
+            Toast.makeText(this, "This camera does not report additional hardware filters.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = effects.map { it.second }.toTypedArray()
+        val selectedIndex = effects.indexOfFirst { it.first == selectedEffectMode }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Filters")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                selectedEffectMode = effects[which].first
+                updateFilterButton()
+                startPreviewRepeating()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun updateFilterButton() {
+        if (!::filterButton.isInitialized) return
+        val effect = availableEffects().firstOrNull { it.first == selectedEffectMode }?.second ?: "Original"
+        filterButton.text = "✧"
+        filterButton.contentDescription = "Filter: $effect"
+    }
+
+    private fun applyFilter(builder: CaptureRequest.Builder) {
+        val supported = cameraCharacteristics
+            ?.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS)
+            ?.contains(selectedEffectMode) == true
+        if (supported || selectedEffectMode == CaptureRequest.CONTROL_EFFECT_MODE_OFF) {
+            builder.set(CaptureRequest.CONTROL_EFFECT_MODE, selectedEffectMode)
         }
     }
 
@@ -477,7 +662,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun weightedControl() = LinearLayout.LayoutParams(0, dp(48), 1f)
+    private fun weightedControl() = LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+        marginStart = dp(1)
+        marginEnd = dp(1)
+    }
 
     private fun cycleFlash() {
         val available = cameraCharacteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
@@ -492,7 +680,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun updateFlashButton() {
         if (!::flashButton.isInitialized) return
-        flashButton.text = "⚡"
+        flashButton.text = if (flashMode == 2) "ϟ" else "⚡"
         flashButton.contentDescription = when (flashMode) {
             0 -> "Flash auto"
             1 -> "Flash on"
@@ -521,18 +709,38 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun showAspectRatioPicker() {
         val choices = listOf("3:4", "9:16", "1:1", "Full")
         AlertDialog.Builder(this)
-            .setTitle("Photo ratio")
+            .setTitle("Photo size")
             .setSingleChoiceItems(choices.toTypedArray(), choices.indexOf(aspectRatio)) { dialog, which ->
                 val selected = choices[which]
                 if (selected != aspectRatio) {
                     aspectRatio = selected
+                    getSharedPreferences("camera_settings", MODE_PRIVATE)
+                        .edit().putString("photo_ratio", selected).apply()
                     aspectButton.text = selected
+                    updateRatioChrome()
                     recreateImageReaderAndSession()
                 }
                 dialog.dismiss()
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun updateRatioChrome() {
+        val isFull = aspectRatio == "Full"
+        val panelColor = if (isFull) Color.TRANSPARENT else 0xCC000000.toInt()
+        if (::topPanel.isInitialized) topPanel.setBackgroundColor(panelColor)
+        if (::bottomPanel.isInitialized) bottomPanel.setBackgroundColor(panelColor)
+        if (::topGradientView.isInitialized) {
+            topGradientView.visibility = if (isFull) View.GONE else View.VISIBLE
+        }
+        if (::bottomGradientView.isInitialized) {
+            bottomGradientView.visibility = if (isFull) View.GONE else View.VISIBLE
+        }
+        if (::aspectButton.isInitialized) {
+            aspectButton.text = aspectRatio
+            aspectButton.contentDescription = "Photo size: $aspectRatio"
+        }
     }
 
     private fun onShutterPressed() {
@@ -560,6 +768,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                 setFlashForRequest(this)
+                applyFilter(this)
                 applyZoom(this)
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation())
             }
@@ -637,31 +846,45 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val minZoom = bounds.first
         val maxZoom = bounds.second
         val levels = mutableListOf<Float>()
-        if (minZoom <= 0.55f) levels.add(0.5f)
-        levels.add(1f)
-        if (maxZoom >= 1.9f) levels.add(2f)
-        if (maxZoom >= 3.8f) levels.add(4f)
-        zoomLevels = levels.distinct()
+
+        fun addLevel(value: Float) {
+            if (value < minZoom - 0.015f || value > maxZoom + 0.015f) return
+            if (levels.none { abs(it - value) < 0.02f }) {
+                levels.add(value.coerceIn(minZoom, maxZoom))
+            }
+        }
+
+        if (minZoom < 0.98f) addLevel(minZoom)
+        listOf(0.5f, 0.9f, 1f, 2f, 4f, 8f).forEach { addLevel(it) }
+        if (levels.none { abs(it - maxZoom) < 0.02f }) addLevel(maxZoom)
+        if (levels.isEmpty()) addLevel(1f)
+        zoomLevels = levels.sorted()
         zoomRatio = zoomRatio.coerceIn(minZoom, maxZoom)
 
         zoomLevels.forEach { level ->
             val selected = abs(zoomRatio - level) < 0.08f
+            val label = if (abs(level - level.toInt()) < 0.01f) {
+                "${level.toInt()}×"
+            } else {
+                "${String.format(Locale.US, "%.1f", level)}×"
+            }
             val chip = TextView(this).apply {
-                text = if (level == 1f) "1×" else "${level}×"
-                textSize = 13f
+                text = label
+                textSize = 12f
                 gravity = Gravity.CENTER
                 setTextColor(if (selected) Color.BLACK else Color.WHITE)
                 background = if (selected) oval(Color.WHITE) else null
                 isClickable = true
                 isFocusable = true
+                contentDescription = "Zoom $label"
                 setOnClickListener { setZoom(level) }
             }
-            val diameter = if (selected) dp(48) else dp(42)
+            val diameter = if (selected) dp(44) else dp(38)
             zoomRow.addView(
                 chip,
-                LinearLayout.LayoutParams(diameter, dp(48)).apply {
-                    marginStart = dp(7)
-                    marginEnd = dp(7)
+                LinearLayout.LayoutParams(diameter, dp(46)).apply {
+                    marginStart = dp(4)
+                    marginEnd = dp(4)
                 }
             )
         }
@@ -714,9 +937,35 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun findCameraId(facing: Int): String? {
         return try {
-            cameraManager.cameraIdList.firstOrNull { id ->
-                cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == facing
+            val candidates = cameraManager.cameraIdList.mapNotNull { id ->
+                val characteristics = cameraManager.getCameraCharacteristics(id)
+                if (characteristics.get(CameraCharacteristics.LENS_FACING) == facing) {
+                    id to characteristics
+                } else {
+                    null
+                }
             }
+            if (candidates.isEmpty()) return null
+            if (facing == CameraCharacteristics.LENS_FACING_FRONT) return candidates.first().first
+
+            val logicalMultiCamera = candidates.firstOrNull { (_, characteristics) ->
+                val capabilities = characteristics.get(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+                )
+                capabilities?.contains(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+                ) == true
+            }
+            logicalMultiCamera?.first ?: candidates.maxByOrNull { (_, characteristics) ->
+                val ratioRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                } else null
+                if (ratioRange != null) {
+                    ratioRange.upper - ratioRange.lower
+                } else {
+                    characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+                }
+            }?.first
         } catch (_: CameraAccessException) {
             null
         }
@@ -892,6 +1141,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                applyFilter(this)
                 applyZoom(this)
             }
             session.setRepeatingRequest(request.build(), null, cameraHandler)
@@ -950,6 +1200,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastPhotoUri = uri
             runOnUiThread {
                 galleryThumbnail.setImageURI(uri)
+                galleryPlaceholder.visibility = View.GONE
                 Toast.makeText(this, "Photo saved to Pictures/Camera", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
