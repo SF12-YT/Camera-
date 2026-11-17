@@ -2074,7 +2074,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.DATE_TAKEN
+            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.MediaColumns.VOLUME_NAME
         )
         val selection: String
         val selectionArgs: Array<String>
@@ -2103,13 +2104,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
             val takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+            val volumeColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.VOLUME_NAME)
+            } else {
+                -1
+            }
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idColumn)
                 val name = if (cursor.isNull(nameColumn)) "Camera photo" else cursor.getString(nameColumn)
                 val taken = if (cursor.isNull(takenColumn)) 0L else cursor.getLong(takenColumn)
+                val photoCollection = if (volumeColumn >= 0 && !cursor.isNull(volumeColumn)) {
+                    MediaStore.Images.Media.getContentUri(cursor.getString(volumeColumn))
+                } else {
+                    collection
+                }
                 photos.add(
                     CameraRollPhoto(
-                        ContentUris.withAppendedId(collection, id),
+                        ContentUris.withAppendedId(photoCollection, id),
                         name,
                         taken
                     )
