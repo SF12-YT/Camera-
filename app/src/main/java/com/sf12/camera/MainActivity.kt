@@ -259,15 +259,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             visibility = View.GONE
             setPadding(dp(12), 0, dp(12), 0)
         }
-        root.addView(
+        topPanel.addView(
             expandedOptionsRow,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(52),
-                Gravity.TOP
-            ).apply {
-                topMargin = dp(61)
-            }
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+            )
         )
 
         bottomPanel = LinearLayout(this).apply {
@@ -690,7 +687,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun weightedControl() = LinearLayout.LayoutParams(0, dp(52), 1f)
 
     private fun cycleFlash() {
-        showFlashOptions()
+        showExpandedOptions("flash")
     }
 
     private fun updateFlashButton() {
@@ -701,71 +698,71 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             else -> "Flash off"
         }
         flashButton.invalidate()
-        if (expandedOptionsKind == "flash") showExpandedOptions("flash", keepOpen = true)
-    }
-
-    private fun showFlashOptions() {
-        showExpandedOptions("flash")
     }
 
     private fun cycleTimer() {
-        showTimerOptions()
+        showExpandedOptions("timer")
     }
 
     private fun updateTimerButton() {
         if (!::timerButton.isInitialized) return
         timerButton.contentDescription = when (timerSeconds) {
             0 -> "Timer off"
-            else -> "Timer ${timerSeconds} seconds"
+            else -> "Timer $timerSeconds seconds"
         }
         timerButton.invalidate()
-        if (expandedOptionsKind == "timer") showExpandedOptions("timer", keepOpen = true)
     }
 
-    private fun showTimerOptions() {
-        showExpandedOptions("timer")
-    }
-
-    private fun showExpandedOptions(kind: String, keepOpen: Boolean = false) {
+    private fun showExpandedOptions(kind: String) {
         if (!::expandedOptionsRow.isInitialized) return
-        if (!keepOpen && expandedOptionsKind == kind) {
-            expandedOptionsKind = null
-            expandedOptionsRow.visibility = View.GONE
-            expandedOptionsRow.removeAllViews()
+
+        if (expandedOptionsKind == kind) {
+            closeExpandedOptions()
             return
         }
 
         expandedOptionsKind = kind
+        quickControls.visibility = View.GONE
         expandedOptionsRow.removeAllViews()
 
-        val options = if (kind == "flash") {
-            listOf("flashOff", "flashAuto", "flashOn")
-        } else {
-            listOf("timerOff", "timer2", "timer5", "timer10")
+        val options = when (kind) {
+            "flash" -> listOf("flashOff", "flashAuto", "flashOn")
+            "timer" -> listOf("timerOff", "timer2", "timer5", "timer10")
+            else -> listOf("ratio_3_4", "ratio_9_16", "ratio_1_1", "ratio_full")
         }
 
         options.forEach { option ->
             val button = CameraIconButton(this, option) {
-                if (kind == "flash") {
-                    flashMode = when (option) {
-                        "flashOff" -> 2
-                        "flashAuto" -> 0
-                        else -> 1
+                when (kind) {
+                    "flash" -> {
+                        flashMode = when (option) {
+                            "flashOff" -> 2
+                            "flashAuto" -> 0
+                            else -> 1
+                        }
+                        updateFlashButton()
+                        startPreviewRepeating()
                     }
-                    updateFlashButton()
-                    startPreviewRepeating()
-                } else {
-                    timerSeconds = when (option) {
-                        "timer2" -> 2
-                        "timer5" -> 5
-                        "timer10" -> 10
-                        else -> 0
+                    "timer" -> {
+                        timerSeconds = when (option) {
+                            "timer2" -> 2
+                            "timer5" -> 5
+                            "timer10" -> 10
+                            else -> 0
+                        }
+                        updateTimerButton()
                     }
-                    updateTimerButton()
+                    "ratio" -> {
+                        val selected = when (option) {
+                            "ratio_9_16" -> "9:16"
+                            "ratio_1_1" -> "1:1"
+                            "ratio_full" -> "Full"
+                            else -> "3:4"
+                        }
+                        applyPhotoRatio(selected)
+                    }
                 }
-                expandedOptionsKind = null
-                expandedOptionsRow.visibility = View.GONE
-                expandedOptionsRow.removeAllViews()
+                closeExpandedOptions()
             }.apply {
                 contentDescription = when (option) {
                     "flashOff" -> "Flash off"
@@ -774,7 +771,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     "timerOff" -> "Timer off"
                     "timer2" -> "2 second timer"
                     "timer5" -> "5 second timer"
-                    else -> "10 second timer"
+                    "timer10" -> "10 second timer"
+                    "ratio_3_4" -> "3 by 4 photo ratio"
+                    "ratio_9_16" -> "9 by 16 photo ratio"
+                    "ratio_1_1" -> "Square photo ratio"
+                    else -> "Full photo ratio"
                 }
                 val available = cameraCharacteristics
                     ?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
@@ -785,29 +786,35 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             expandedOptionsRow.addView(
                 button,
-                LinearLayout.LayoutParams(0, dp(50), 1f)
+                LinearLayout.LayoutParams(0, dp(52), 1f)
             )
         }
+
         expandedOptionsRow.visibility = View.VISIBLE
     }
 
+    private fun closeExpandedOptions() {
+        expandedOptionsKind = null
+        if (::expandedOptionsRow.isInitialized) {
+            expandedOptionsRow.visibility = View.GONE
+            expandedOptionsRow.removeAllViews()
+        }
+        if (::quickControls.isInitialized) {
+            quickControls.visibility = View.VISIBLE
+        }
+    }
+
     private fun showAspectRatioPicker() {
-        val choices = listOf("3:4", "9:16", "1:1", "Full")
-        AlertDialog.Builder(this)
-            .setTitle("Photo size")
-            .setSingleChoiceItems(choices.toTypedArray(), choices.indexOf(aspectRatio)) { dialog, which ->
-                val selected = choices[which]
-                if (selected != aspectRatio) {
-                    aspectRatio = selected
-                    getSharedPreferences("camera_settings", MODE_PRIVATE)
-                        .edit().putString("photo_ratio", selected).apply()
-                    updateRatioChrome()
-                    recreateImageReaderAndSession()
-                }
-                dialog.dismiss()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        showExpandedOptions("ratio")
+    }
+
+    private fun applyPhotoRatio(selected: String) {
+        if (selected == aspectRatio) return
+        aspectRatio = selected
+        getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .edit().putString("photo_ratio", selected).apply()
+        updateRatioChrome()
+        recreateImageReaderAndSession()
     }
 
     private fun updateRatioChrome() {
@@ -1044,20 +1051,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun openLastPhoto() {
-        // Launch Samsung Gallery without an image URI. Passing ACTION_VIEW with a
-        // single MediaStore item opens only that image instead of the camera roll.
+        // Samsung Gallery handles this directory MIME type as its camera-roll
+        // image grid, rather than opening a single photo or the Albums landing page.
+        val cameraRollIntent = Intent(Intent.ACTION_VIEW).apply {
+            setType("vnd.android.cursor.dir/image")
+            setPackage("com.sec.android.gallery3d")
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        try {
+            startActivity(cameraRollIntent)
+            return
+        } catch (_: Exception) {
+            // Use the installed gallery's launch page on non-Samsung devices.
+        }
+
         val samsungGallery = packageManager.getLaunchIntentForPackage("com.sec.android.gallery3d")
         if (samsungGallery != null) {
             try {
                 startActivity(samsungGallery)
                 return
             } catch (_: Exception) {
-                // Fall back to Android's gallery category for other devices.
+                // Continue to Android's generic Gallery category.
             }
         }
 
         try {
-            val galleryIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_GALLERY)
+            val galleryIntent = Intent(Intent.ACTION_MAIN)
+                .addCategory(Intent.CATEGORY_APP_GALLERY)
             startActivity(galleryIntent)
         } catch (_: Exception) {
             Toast.makeText(this, "No gallery app is available.", Toast.LENGTH_SHORT).show()
@@ -1553,6 +1573,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "timer2" -> timerSeconds == 2
                 "timer5" -> timerSeconds == 5
                 "timer10" -> timerSeconds == 10
+                "ratio_3_4" -> aspectRatio == "3:4"
+                "ratio_9_16" -> aspectRatio == "9:16"
+                "ratio_1_1" -> aspectRatio == "1:1"
+                "ratio_full" -> aspectRatio == "Full"
                 else -> false
             }
             strokePaint.color = if (highlighted) yellow else Color.WHITE
@@ -1570,6 +1594,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "timer5" -> drawTimer(canvas, 5)
                 "timer10" -> drawTimer(canvas, 10)
                 "ratio" -> drawRatio(canvas)
+                "ratio_3_4" -> drawRatioChoice(canvas, "3:4")
+                "ratio_9_16" -> drawRatioChoice(canvas, "9:16")
+                "ratio_1_1" -> drawRatioChoice(canvas, "1:1")
+                "ratio_full" -> drawRatioChoice(canvas, "Full")
                 "motion" -> drawMotion(canvas)
                 "filters" -> drawFilters(canvas)
                 "gallery" -> drawGallery(canvas)
@@ -1626,15 +1654,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         private fun drawTimer(canvas: android.graphics.Canvas, seconds: Int) {
-            canvas.drawCircle(11.5f, 12f, 9f, strokePaint)
-            canvas.drawLine(11.5f, 1.8f, 11.5f, 3.5f, strokePaint)
-            canvas.drawLine(9.4f, 1.8f, 13.6f, 1.8f, strokePaint)
-            canvas.drawLine(11.5f, 12f, 11.5f, 6.4f, strokePaint)
-            canvas.drawLine(11.5f, 12f, 15.5f, 14.1f, strokePaint)
+            val face = android.graphics.RectF(2.5f, 2.5f, 20.5f, 20.5f)
+            if (seconds == 0) {
+                canvas.drawCircle(11.5f, 11.5f, 8.6f, strokePaint)
+            } else {
+                // Leave the lower-right quadrant open so the duration sits beside
+                // the clock face, as in Samsung Camera's timer selector.
+                canvas.drawArc(face, 45f, 270f, false, strokePaint)
+            }
+            canvas.drawLine(11.5f, 11.5f, 11.5f, 5.8f, strokePaint)
+            canvas.drawLine(11.5f, 11.5f, 15.2f, 13.6f, strokePaint)
+
             if (seconds > 0) {
                 val numberPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                     color = strokePaint.color
-                    textSize = if (seconds == 10) 6.5f else 8f
+                    textSize = if (seconds == 10) 6.1f else 7.8f
                     typeface = android.graphics.Typeface.create(
                         "sans-serif-medium",
                         android.graphics.Typeface.NORMAL
@@ -1644,8 +1678,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 canvas.drawText(
                     seconds.toString(),
-                    if (seconds == 10) 18.2f else 17.7f,
-                    21.8f,
+                    if (seconds == 10) 19.3f else 18.5f,
+                    20.4f,
                     numberPaint
                 )
             }
@@ -1653,47 +1687,94 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         private fun drawRatio(canvas: android.graphics.Canvas) {
             val p = strokePaint
-            canvas.drawLine(2.5f, 5f, 21.5f, 5f, p)
-            canvas.drawLine(2.5f, 19f, 21.5f, 19f, p)
-            canvas.drawLine(5f, 3f, 5f, 21f, p)
-            canvas.drawLine(19f, 3f, 19f, 21f, p)
+            // Samsung's open-corner crop frame with the ratio label in the centre.
+            val corners = android.graphics.Path().apply {
+                moveTo(8f, 2.7f)
+                lineTo(5.3f, 2.7f)
+                quadTo(2.5f, 2.7f, 2.5f, 5.5f)
+                lineTo(2.5f, 8f)
+
+                moveTo(16f, 2.7f)
+                lineTo(18.7f, 2.7f)
+                quadTo(21.5f, 2.7f, 21.5f, 5.5f)
+                lineTo(21.5f, 8f)
+
+                moveTo(2.5f, 16f)
+                lineTo(2.5f, 18.5f)
+                quadTo(2.5f, 21.3f, 5.3f, 21.3f)
+                lineTo(8f, 21.3f)
+
+                moveTo(16f, 21.3f)
+                lineTo(18.7f, 21.3f)
+                quadTo(21.5f, 21.3f, 21.5f, 18.5f)
+                lineTo(21.5f, 16f)
+            }
+            canvas.drawPath(corners, p)
             val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                 color = p.color
                 textAlign = android.graphics.Paint.Align.CENTER
-                textSize = if (aspectRatio == "Full") 6f else 7f
-                typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL)
+                textSize = if (aspectRatio == "Full") 6.3f else 7.6f
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.NORMAL
+                )
                 style = android.graphics.Paint.Style.FILL
             }
             canvas.drawText(
                 if (aspectRatio == "Full") "FULL" else aspectRatio,
                 12f,
-                14.5f,
+                14.9f,
                 textPaint
             )
         }
 
+        private fun drawRatioChoice(canvas: android.graphics.Canvas, ratio: String) {
+            val p = strokePaint
+            val rect = when (ratio) {
+                "3:4" -> android.graphics.RectF(5f, 2.5f, 19f, 21.5f)
+                "9:16" -> android.graphics.RectF(7.3f, 2f, 16.7f, 22f)
+                "1:1" -> android.graphics.RectF(3f, 3f, 21f, 21f)
+                else -> android.graphics.RectF(2f, 5f, 22f, 19f)
+            }
+            canvas.drawRoundRect(rect, 1.8f, 1.8f, p)
+        }
+
         private fun drawMotion(canvas: android.graphics.Canvas) {
             val p = strokePaint
-            canvas.drawRoundRect(android.graphics.RectF(2.5f, 4f, 21.5f, 20f), 2f, 2f, p)
+            // Rounded image frame and small play arrow projecting from its right edge.
+            val frame = android.graphics.Path().apply {
+                moveTo(5.5f, 3.5f)
+                lineTo(15.5f, 3.5f)
+                quadTo(18f, 3.5f, 18f, 6f)
+                lineTo(18f, 18f)
+                quadTo(18f, 20.5f, 15.5f, 20.5f)
+                lineTo(5.5f, 20.5f)
+                quadTo(3f, 20.5f, 3f, 18f)
+                lineTo(3f, 6f)
+                quadTo(3f, 3.5f, 5.5f, 3.5f)
+                close()
+            }
+            canvas.drawPath(frame, p)
             val play = android.graphics.Path().apply {
-                moveTo(10f, 7.5f)
-                lineTo(16.5f, 12f)
-                lineTo(10f, 16.5f)
+                moveTo(15.3f, 8f)
+                lineTo(22f, 12f)
+                lineTo(15.3f, 16f)
                 close()
             }
             canvas.drawPath(play, p)
-            canvas.drawArc(android.graphics.RectF(4f, 5.5f, 19.5f, 20f), 205f, 260f, false, p)
         }
 
         private fun drawFilters(canvas: android.graphics.Canvas) {
             val p = strokePaint
-            canvas.drawLine(5f, 19f, 18.5f, 5.5f, p)
-            canvas.drawLine(14.5f, 2.5f, 14.5f, 8f, p)
-            canvas.drawLine(12f, 5.2f, 17f, 5.2f, p)
-            canvas.drawLine(5f, 2.5f, 5f, 7.5f, p)
-            canvas.drawLine(2.5f, 5f, 7.5f, 5f, p)
-            canvas.drawLine(19f, 15f, 19f, 20f, p)
-            canvas.drawLine(16.5f, 17.5f, 21.5f, 17.5f, p)
+            // Samsung's magic-wand silhouette with three crisp sparkle rays.
+            canvas.drawLine(5.2f, 18.7f, 17.5f, 6.3f, p)
+            canvas.drawLine(4f, 20f, 6.4f, 17.6f, p)
+            canvas.drawLine(14.8f, 2.2f, 14.8f, 6.5f, p)
+            canvas.drawLine(12.7f, 4.35f, 17f, 4.35f, p)
+            canvas.drawLine(4.5f, 3.3f, 4.5f, 7.5f, p)
+            canvas.drawLine(2.4f, 5.4f, 6.6f, 5.4f, p)
+            canvas.drawLine(20f, 14.4f, 20f, 18.5f, p)
+            canvas.drawLine(17.9f, 16.45f, 22.1f, 16.45f, p)
         }
 
         private fun drawGallery(canvas: android.graphics.Canvas) {
