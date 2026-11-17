@@ -42,6 +42,7 @@ import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -114,11 +115,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     )
     private var moreModesOverlay: FrameLayout? = null
     private var modeEditorOverlay: FrameLayout? = null
+    private var cameraRollOverlay: FrameLayout? = null
     private data class ModeDragPayload(val mode: String, val sourceGroup: String)
     private data class CameraStorageLocation(
         val volumeName: String,
         val label: String,
-        val isRemovable: Boolean
+        val isRemovable: Boolean,
+        val isAvailable: Boolean = true,
+        val status: String = ""
+    )
+    private data class CameraRollPhoto(
+        val uri: Uri,
+        val displayName: String,
+        val dateTaken: Long
     )
     private val knownCameraModes = listOf(
         "Portrait", "Photo", "Video", "Pro Video", "Night", "Single Take", "Food",
@@ -198,6 +207,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     @Deprecated("Deprecated in Android API; retained for back compatibility.")
     override fun onBackPressed() {
+        if (cameraRollOverlay != null) {
+            closeCameraRoll()
+            return
+        }
         if (modeEditorOverlay != null) {
             closeModeManager()
             return
@@ -581,67 +594,101 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun showSettings() {
         val profiles = arrayOf("Basic", "Pro", "Advanced", "Astrophotography")
+        val currentStorage = selectedCameraStorageLocation()?.label ?: "Internal storage"
         AlertDialog.Builder(this)
             .setTitle("Camera settings")
+            .setMessage("Photo save location: $currentStorage")
             .setSingleChoiceItems(profiles, profiles.indexOf(activeTab)) { dialog, which ->
                 selectTab(profiles[which])
                 dialog.dismiss()
             }
-            .setNeutralButton("Storage") { _, _ -> showStorageLocationPicker() }
+            .setNeutralButton("Storage location") { _, _ -> showStorageLocationPicker() }
             .setNegativeButton("Close", null)
             .show()
     }
 
     private fun availableCameraStorageLocations(): List<CameraStorageLocation> {
-        val primary = CameraStorageLocation(
-            MediaStore.VOLUME_EXTERNAL_PRIMARY,
-            "Internal storage",
-            false
+        val locations = mutableListOf(
+            CameraStorageLocation(
+                MediaStore.VOLUME_EXTERNAL_PRIMARY,
+                "Internal storage",
+                false,
+                true,
+                "Ready"
+            )
         )
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            return listOf(primary)
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return locations
 
-        val availableVolumeNames = try {
+        val storageManager = getSystemService(Context.STORAGE_SERVICE) as? StorageManager
+        val mediaStoreNames = try {
             MediaStore.getExternalVolumeNames(this)
         } catch (_: Exception) {
             emptySet<String>()
         }
+        var removableVolumesFound = false
 
-        val locations = mutableListOf<CameraStorageLocation>()
-        if (MediaStore.VOLUME_EXTERNAL_PRIMARY in availableVolumeNames) {
-            locations.add(primary)
-        }
-
-        val storageManager = getSystemService(Context.STORAGE_SERVICE) as? StorageManager
-        storageManager?.storageVolumes?.forEach { volume ->
-            if (!volume.isRemovable || volume.state != Environment.MEDIA_MOUNTED) {
-                return@forEach
-            }
-
-            val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                volume.mediaStoreVolumeName
-            } else {
+        storageManager?.storageVolumes?.forEachIndexed { index, volume ->
+            if (volume.isPrimary || !volume.isRemovable) return@forEachIndexed
+            removableVolumesFound = true
+            val state = volume.state
+            val mounted = state == Environment.MEDIA_MOUNTED
+            val readOnly = state == Environment.MEDIA_MOUNTED_READ_ONLY
+            val platformVolumeName = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    volume.mediaStoreVolumeName
+                } else {
+                    volume.uuid?.lowercase(Locale.US)
+                }
+            } catch (_: Exception) {
                 volume.uuid?.lowercase(Locale.US)
             }
-            if (volumeName.isNullOrBlank() ||
-                volumeName !in availableVolumeNames ||
-                locations.any { it.volumeName == volumeName }
-            ) {
-                return@forEach
+            val matchingMediaStoreName = platformVolumeName?.let { candidate ->
+                mediaStoreNames.firstOrNull { it.equals(candidate, ignoreCase = true) }
             }
+            val volumeName = matchingMediaStoreName ?: platformVolumeName
+            val description = try {
+                volume.getDescription(this).trim()
+            } catch (_: Exception) {
+                "SD card"
+            }.ifBlank { "SD card" }
 
-            val description = volume.getDescription(this).trim()
+            val isIndexed = !volumeName.isNullOrBlank() &&
+                (matchingMediaStoreName != null ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && platformVolumeName != null))
+            val isAvailable = mounted && isIndexed && !volumeName.isNullOrBlank()
+            val status = when {
+                readOnly -> "Mounted read-only"
+                !mounted -> state.replace('_', ' ').lowercase(Locale.ROOT)
+                    .replaceFirstChar { it.uppercase(Locale.ROOT) }
+                !isIndexed -> "Detected, but not indexed by MediaStore"
+                else -> "Ready"
+            }
+            val safeVolumeName = volumeName?.takeIf { it.isNotBlank() }
+                ?: "__unavailable_sd_$index"
+            if (locations.none { it.volumeName == safeVolumeName }) {
+                locations.add(
+                    CameraStorageLocation(
+                        safeVolumeName,
+                        description,
+                        true,
+                        isAvailable,
+                        status
+                    )
+                )
+            }
+        }
+
+        if (!removableVolumesFound) {
             locations.add(
                 CameraStorageLocation(
-                    volumeName,
-                    description.ifBlank { "SD card" },
-                    true
+                    "__no_sd_card__",
+                    "SD card",
+                    true,
+                    false,
+                    "No removable SD card detected"
                 )
             )
         }
-
-        if (locations.isEmpty()) locations.add(primary)
         return locations
     }
 
@@ -650,7 +697,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             .getString("camera_storage_volume", MediaStore.VOLUME_EXTERNAL_PRIMARY)
             ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
         return availableCameraStorageLocations()
-            .firstOrNull { it.volumeName == selectedVolume }
+            .firstOrNull { it.isAvailable && it.volumeName == selectedVolume }
     }
 
     private fun showStorageLocationPicker() {
@@ -660,17 +707,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             "camera_storage_volume",
             MediaStore.VOLUME_EXTERNAL_PRIMARY
         )
-        val selectedIndex = locations.indexOfFirst { it.volumeName == selectedVolume }
-            .coerceAtLeast(0)
+        val selectedIndex = locations.indexOfFirst {
+            it.isAvailable && it.volumeName == selectedVolume
+        }
         val labels = locations.map { location ->
-            "${location.label}  ·  DCIM/Camera"
+            if (location.isAvailable) {
+                "${location.label}  ·  DCIM/Camera"
+            } else {
+                "${location.label}  ·  ${location.status}"
+            }
         }.toTypedArray()
 
         AlertDialog.Builder(this)
             .setTitle("Save photos to")
-            .setMessage("Choose where new photos and the Camera roll are stored.")
+            .setMessage(
+                "Android detected ${locations.count { it.isRemovable }} removable volume(s); " +
+                    "${locations.count { it.isRemovable && it.isAvailable }} are ready for Camera storage."
+            )
             .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
                 val location = locations[which]
+                if (!location.isAvailable) {
+                    Toast.makeText(
+                        this,
+                        "${location.label}: ${location.status}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@setSingleChoiceItems
+                }
                 preferences.edit()
                     .putString("camera_storage_volume", location.volumeName)
                     .apply()
@@ -834,97 +897,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun showMoreModes() {
         closeMoreModes()
-
         val overlay = FrameLayout(this).apply {
+            // 20% opaque black, leaving the viewfinder visible underneath.
             setBackgroundColor(0x33000000)
             setOnClickListener { closeMoreModes() }
         }
-        val panel = LinearLayout(this).apply {
+        val grid = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(18), dp(14), dp(18), dp(14))
-            background = GradientDrawable().apply {
-                // 20% opaque black (approximately 80% transparent), allowing
-                // the live camera preview to remain visible underneath.
-                setColor(0x33000000)
-                cornerRadii = floatArrayOf(
-                    dp(18f).toFloat(), dp(18f).toFloat(),
-                    dp(18f).toFloat(), dp(18f).toFloat(),
-                    0f, 0f, 0f, 0f
-                )
-            }
+            setPadding(dp(12), 0, dp(12), 0)
             isClickable = true
             setOnClickListener { }
         }
-
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        header.addView(TextView(this).apply {
-            text = "MORE"
-            textSize = 14f
-            letterSpacing = 0.14f
-            setTextColor(Color.WHITE)
-            typeface = android.graphics.Typeface.create(
-                "sans-serif-medium",
-                android.graphics.Typeface.NORMAL
-            )
-        }, LinearLayout.LayoutParams(0, dp(40), 1f))
-
-        val closeButton = TextView(this).apply {
-            text = "×"
-            textSize = 28f
-            gravity = Gravity.CENTER
-            setTextColor(0xFFDDDDDD.toInt())
-            isClickable = true
-            setOnClickListener { closeMoreModes() }
-        }
-        header.addView(closeButton, LinearLayout.LayoutParams(dp(44), dp(40)))
-        panel.addView(header)
-
-        val bixbyVisionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                Toast.makeText(
-                    this@MainActivity,
-                    "Bixby Vision is not available in this build yet.",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-            addView(TextView(this@MainActivity).apply {
-                text = "◎"
-                textSize = 25f
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-            }, LinearLayout.LayoutParams(dp(38), dp(42)))
-            addView(TextView(this@MainActivity).apply {
-                text = "BIXBY VISION"
-                textSize = 11f
-                letterSpacing = 0.05f
-                gravity = Gravity.CENTER_VERTICAL
-                setTextColor(Color.WHITE)
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                dp(42)
-            ))
-        }
-        panel.addView(
-            bixbyVisionRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(46)
-            )
-        )
-
-        val scroll = android.widget.ScrollView(this).apply {
-            isFillViewport = true
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         addModeGridRows(grid, moreModes, editing = false, group = "more")
         if (moreModes.isEmpty()) {
             grid.addView(TextView(this).apply {
@@ -935,24 +919,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 setPadding(0, dp(24), 0, dp(24))
             })
         }
-        scroll.addView(grid)
-        panel.addView(
-            scroll,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-            )
+        overlay.addView(
+            grid,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            ).apply { topMargin = dp(118) }
         )
 
-        val footer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        }
         val addButton = TextView(this).apply {
             text = "+"
             textSize = 30f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            background = oval(0x33444444)
+            background = oval(0x55444444)
             contentDescription = "Edit camera modes"
             isClickable = true
             isFocusable = true
@@ -961,16 +942,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 showModeManager()
             }
         }
-        footer.addView(addButton, LinearLayout.LayoutParams(dp(48), dp(48)))
-        panel.addView(footer)
-
         overlay.addView(
-            panel,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(460),
-                Gravity.BOTTOM
-            )
+            addButton,
+            FrameLayout.LayoutParams(dp(50), dp(50), Gravity.END or Gravity.BOTTOM).apply {
+                marginEnd = dp(18)
+                bottomMargin = dp(124)
+            }
         )
         root.addView(
             overlay,
@@ -1026,7 +1003,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     android.graphics.Typeface.NORMAL
                 )
             }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(54)
             ))
             addView(TextView(this@MainActivity).apply {
                 text = mode.uppercase(Locale.ROOT)
@@ -1719,8 +1696,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 projection,
                 selection,
                 selectionArgs,
-                "${MediaStore.Images.Media.DATE_ADDED} DESC, " +
-                    "${MediaStore.Images.Media.DATE_MODIFIED} DESC, " +
+                "${MediaStore.Images.Media.DATE_TAKEN} DESC, " +
+                    "${MediaStore.Images.Media.DATE_ADDED} DESC, " +
                     "${MediaStore.Images.Media._ID} DESC"
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
@@ -1737,35 +1714,256 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private fun queryCameraRoll(storage: CameraStorageLocation): List<CameraRollPhoto> {
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(storage.volumeName)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.DATE_TAKEN
+        )
+        val selection: String
+        val selectionArgs: Array<String>
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+            selectionArgs = arrayOf(Environment.DIRECTORY_DCIM + "/Camera/%")
+        } else {
+            selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+            selectionArgs = arrayOf("Camera")
+        }
+
+        val photos = mutableListOf<CameraRollPhoto>()
+        contentResolver.query(
+            collection,
+            projection,
+            selection,
+            selectionArgs,
+            "${MediaStore.Images.Media.DATE_TAKEN} DESC, " +
+                "${MediaStore.Images.Media.DATE_ADDED} DESC, " +
+                "${MediaStore.Images.Media._ID} DESC"
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            val takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idColumn)
+                val name = if (cursor.isNull(nameColumn)) "Camera photo" else cursor.getString(nameColumn)
+                val taken = if (cursor.isNull(takenColumn)) 0L else cursor.getLong(takenColumn)
+                photos.add(
+                    CameraRollPhoto(
+                        ContentUris.withAppendedId(collection, id),
+                        name,
+                        taken
+                    )
+                )
+            }
+        }
+        return photos
+    }
+
+    private fun closeCameraRoll() {
+        cameraRollOverlay?.let { root.removeView(it) }
+        cameraRollOverlay = null
+    }
+
     private fun openLastPhoto() {
         if (!hasGalleryReadPermission()) {
             requestGalleryReadPermission()
-            Toast.makeText(this, "Allow photo access to open the latest camera photo.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Allow photo access to open the Camera roll.", Toast.LENGTH_SHORT).show()
             return
         }
-
-        val selectedStorage = selectedCameraStorageLocation()
-        if (selectedStorage == null) {
+        val storage = selectedCameraStorageLocation()
+        if (storage == null) {
             Toast.makeText(
                 this,
-                "The selected storage is unavailable. Insert the SD card or choose Internal storage in Settings.",
+                "The selected storage is unavailable. Choose an available location in Camera settings.",
                 Toast.LENGTH_LONG
             ).show()
             return
         }
-
-        val latestPhotoUri = findLatestCameraPhotoUri() ?: lastPhotoUri?.takeIf { uri ->
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
-                MediaStore.getVolumeName(uri) == selectedStorage.volumeName
+        closeCameraRoll()
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(0xFF080808.toInt())
+            isClickable = true
         }
-        if (latestPhotoUri == null) {
-            Toast.makeText(this, "No camera photos in ${selectedStorage.label}.", Toast.LENGTH_SHORT).show()
-            return
+        cameraRollOverlay = overlay
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        val loading = TextView(this).apply {
+            text = "Loading Camera roll…"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
         }
+        overlay.addView(
+            loading,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
 
-        // Keep the original MediaStore item URI: Samsung Gallery handles the
-        // Camera roll from this URI on the S10e. Do not synthesize a bucket URI
-        // or a Samsung-private secmedia ID from MediaStore's _ID.
+        Thread {
+            val photos = try {
+                queryCameraRoll(storage)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            mainHandler.post {
+                if (isFinishing || cameraRollOverlay !== overlay) return@post
+                overlay.removeAllViews()
+                val screen = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setBackgroundColor(0xFF080808.toInt())
+                }
+                val header = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(18), dp(10), dp(12), dp(8))
+                }
+                val titleColumn = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                titleColumn.addView(TextView(this).apply {
+                    text = "Camera"
+                    textSize = 20f
+                    setTextColor(Color.WHITE)
+                    typeface = android.graphics.Typeface.create(
+                        "sans-serif-medium",
+                        android.graphics.Typeface.NORMAL
+                    )
+                })
+                titleColumn.addView(TextView(this).apply {
+                    text = "${photos.size} photos · DCIM/Camera · Newest first"
+                    textSize = 11f
+                    setTextColor(0xFFBDBDBD.toInt())
+                })
+                header.addView(titleColumn, LinearLayout.LayoutParams(0, dp(54), 1f))
+                val closeButton = TextView(this).apply {
+                    text = "×"
+                    textSize = 30f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    isClickable = true
+                    setOnClickListener { closeCameraRoll() }
+                }
+                header.addView(closeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+                screen.addView(header)
+
+                if (photos.isEmpty()) {
+                    screen.addView(TextView(this).apply {
+                        text = "No photos found in ${storage.label}/DCIM/Camera."
+                        textSize = 14f
+                        gravity = Gravity.CENTER
+                        setTextColor(0xFFCCCCCC.toInt())
+                    }, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+                    ))
+                } else {
+                    val scroll = android.widget.ScrollView(this).apply {
+                        isFillViewport = true
+                        overScrollMode = View.OVER_SCROLL_NEVER
+                    }
+                    val grid = GridLayout(this).apply {
+                        columnCount = 3
+                        alignmentMode = GridLayout.ALIGN_BOUNDS
+                        useDefaultMargins = false
+                    }
+                    val cellSize = (resources.displayMetrics.widthPixels / 3).coerceAtLeast(dp(96))
+                    val shownPhotos = photos.take(180)
+                    val imageViews = mutableListOf<ImageView>()
+                    shownPhotos.forEachIndexed { index, photo ->
+                        val image = ImageView(this).apply {
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                            setBackgroundColor(0xFF202020.toInt())
+                            contentDescription = photo.displayName
+                            isClickable = true
+                            isFocusable = true
+                            setOnClickListener { openCameraRollPhoto(photo.uri) }
+                        }
+                        val params = GridLayout.LayoutParams(
+                            GridLayout.spec(index / 3),
+                            GridLayout.spec(index % 3)
+                        ).apply {
+                            width = cellSize
+                            height = cellSize
+                            setMargins(dp(1), dp(1), dp(1), dp(1))
+                        }
+                        grid.addView(image, params)
+                        imageViews.add(image)
+                    }
+                    scroll.addView(
+                        grid,
+                        android.widget.ScrollView.LayoutParams(
+                            android.widget.ScrollView.LayoutParams.MATCH_PARENT,
+                            android.widget.ScrollView.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    screen.addView(
+                        scroll,
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+                        )
+                    )
+                    if (photos.size > shownPhotos.size) {
+                        screen.addView(TextView(this).apply {
+                            text = "Showing the ${shownPhotos.size} most recent photos"
+                            textSize = 10f
+                            gravity = Gravity.CENTER
+                            setTextColor(0xFF888888.toInt())
+                            setPadding(0, dp(4), 0, dp(8))
+                        })
+                    }
+
+                    Thread {
+                        shownPhotos.forEachIndexed { index, photo ->
+                            try {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    val bitmap = contentResolver.loadThumbnail(
+                                        photo.uri,
+                                        Size(dp(180), dp(180)),
+                                        null
+                                    )
+                                    mainHandler.post {
+                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
+                                            imageViews[index].setImageBitmap(bitmap)
+                                        }
+                                    }
+                                } else {
+                                    mainHandler.post {
+                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
+                                            imageViews[index].setImageURI(photo.uri)
+                                        }
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                // Keep a neutral tile when a photo cannot be decoded.
+                            }
+                        }
+                    }.start()
+                }
+
+                overlay.addView(
+                    screen,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
+            }
+        }.start()
+    }
+
+    private fun openCameraRollPhoto(uri: Uri) {
         val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
             setComponent(
                 ComponentName(
@@ -1773,26 +1971,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     "com.sec.android.gallery3d.app.GalleryActivity"
                 )
             )
-            setDataAndType(latestPhotoUri, "image/*")
+            setDataAndType(uri, "image/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-
         try {
             startActivity(samsungIntent)
-            return
         } catch (_: Exception) {
-            // Try the same valid item URI with Android's default image viewer.
-        }
-
-        try {
-            startActivity(
-                Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(latestPhotoUri, "image/*")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            )
-        } catch (_: Exception) {
-            Toast.makeText(this, "Couldn't open the latest camera photo.", Toast.LENGTH_SHORT).show()
+            try {
+                startActivity(
+                    Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, "image/*")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                )
+            } catch (_: Exception) {
+                Toast.makeText(this, "Couldn't open this photo.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -2070,6 +2264,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Camera_$timestamp.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/Camera")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
