@@ -303,7 +303,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             clipToPadding = false
-            isFillViewport = true
+            isFillViewport = false
         }
         modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -313,19 +313,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         primaryModes.forEach { mode ->
             val label = TextView(this).apply {
                 text = mode.uppercase(Locale.ROOT)
-                textSize = 13f
+                textSize = 12f
                 gravity = Gravity.CENTER
+                includeFontPadding = false
+                isSingleLine = true
+                maxLines = 1
                 setTextColor(0xFFBDBDBD.toInt())
-                setPadding(dp(18), dp(9), dp(18), dp(9))
+                setPadding(dp(10), dp(9), dp(10), dp(9))
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { selectMode(mode) }
             }
             modeRow.addView(
                 label,
-                LinearLayout.LayoutParams(0, dp(42), 1f).apply {
-                    marginStart = dp(2)
-                    marginEnd = dp(2)
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    dp(42)
+                ).apply {
+                    marginStart = dp(5)
+                    marginEnd = dp(5)
                 }
             )
             labels[mode] = label
@@ -334,10 +340,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         modeScroll.addView(
             modeRow,
             FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
+        modeScroll.post {
+            val edgeSpace = modeScroll.width / 2
+            modeRow.setPadding(edgeSpace, 0, edgeSpace, 0)
+            centerSelectedMode()
+        }
         bottomPanel.addView(
             modeScroll,
             LinearLayout.LayoutParams(
@@ -594,6 +605,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
             )
             view.background = if (selected) rounded(0xFF303030.toInt(), 100) else null
+        }
+        centerSelectedMode()
+    }
+
+    private fun centerSelectedMode() {
+        if (!::modeScroll.isInitialized || !::modeLabels.isInitialized) return
+        modeScroll.post {
+            val selected = modeLabels[activePrimaryMode] ?: return@post
+            val target = selected.left + selected.width / 2 - modeScroll.width / 2
+            val maxScroll = (modeRow.width - modeScroll.width).coerceAtLeast(0)
+            modeScroll.smoothScrollTo(target.coerceIn(0, maxScroll), 0)
         }
     }
 
@@ -1064,37 +1086,82 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }.start()
     }
 
-    private fun openLastPhoto() {
-        // Samsung Gallery handles this directory MIME type as its camera-roll
-        // image grid, rather than opening a single photo or the Albums landing page.
-        val cameraRollIntent = Intent(Intent.ACTION_VIEW).apply {
-            setType("vnd.android.cursor.dir/image")
-            setPackage("com.sec.android.gallery3d")
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        try {
-            startActivity(cameraRollIntent)
-            return
-        } catch (_: Exception) {
-            // Use the installed gallery's launch page on non-Samsung devices.
+    private fun cameraRollAlbumUri(): Uri {
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val bucketProjection = arrayOf("bucket_id")
+        val paths = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            listOf(
+                Environment.DIRECTORY_DCIM + "/Camera/",
+                Environment.DIRECTORY_PICTURES + "/Camera/"
+            )
+        } else {
+            listOf("Camera")
         }
 
-        val samsungGallery = packageManager.getLaunchIntentForPackage("com.sec.android.gallery3d")
-        if (samsungGallery != null) {
+        for (folder in paths) {
+            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
+            } else {
+                "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+            }
             try {
-                startActivity(samsungGallery)
-                return
+                contentResolver.query(
+                    collection,
+                    bucketProjection,
+                    selection,
+                    arrayOf(folder),
+                    "${MediaStore.Images.Media.DATE_ADDED} DESC"
+                )?.use { cursor ->
+                    if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                        val bucketId = cursor.getString(0)
+                        return collection.buildUpon()
+                            .appendQueryParameter("bucketId", bucketId)
+                            .build()
+                    }
+                }
             } catch (_: Exception) {
-                // Continue to Android's generic Gallery category.
+                // Try the legacy app folder, then the whole image collection.
             }
         }
+        return collection
+    }
+
+    private fun openLastPhoto() {
+        if (!hasGalleryReadPermission()) {
+            requestGalleryReadPermission()
+            Toast.makeText(this, "Allow photo access to open the camera roll.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val cameraRollUri = cameraRollAlbumUri()
+        val samsungIntent = Intent(Intent.ACTION_VIEW, cameraRollUri).apply {
+            setPackage("com.sec.android.gallery3d")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(samsungIntent)
+            return
+        } catch (_: Exception) {
+            // Non-Samsung gallery apps may not support Samsung's album URI.
+        }
 
         try {
-            val galleryIntent = Intent(Intent.ACTION_MAIN)
-                .addCategory(Intent.CATEGORY_APP_GALLERY)
-            startActivity(galleryIntent)
+            startActivity(
+                Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            )
         } catch (_: Exception) {
-            Toast.makeText(this, "No gallery app is available.", Toast.LENGTH_SHORT).show()
+            val gallery = packageManager.getLaunchIntentForPackage("com.sec.android.gallery3d")
+            if (gallery != null) {
+                try {
+                    startActivity(gallery)
+                    return
+                } catch (_: Exception) {
+                    // Report the absence of an image collection handler below.
+                }
+            }
+            Toast.makeText(this, "No camera-roll app is available.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1355,7 +1422,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Camera_$timestamp.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Camera")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/Camera")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
         }
@@ -1381,7 +1448,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastPhotoMimeType = "image/jpeg"
             runOnUiThread {
                 showGalleryThumbnail(uri)
-                Toast.makeText(this, "Photo saved to Pictures/Camera", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Photo saved to DCIM/Camera", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             savedUri?.let { contentResolver.delete(it, null, null) }
@@ -1674,7 +1741,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             } else {
                 // Leave the lower-right quadrant open so the duration sits beside
                 // the clock face, as in Samsung Camera's timer selector.
-                canvas.drawArc(face, 45f, 270f, false, strokePaint)
+                canvas.drawArc(face, 90f, 270f, false, strokePaint)
             }
             canvas.drawLine(11.5f, 11.5f, 11.5f, 5.8f, strokePaint)
             canvas.drawLine(11.5f, 11.5f, 15.2f, 13.6f, strokePaint)
@@ -1693,7 +1760,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 canvas.drawText(
                     seconds.toString(),
                     if (seconds == 10) 19.3f else 18.5f,
-                    20.4f,
+                    20.9f,
                     numberPaint
                 )
             }
