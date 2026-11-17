@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.ContentUris
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -32,6 +33,7 @@ import android.util.Range
 import android.util.Size
 import android.view.Gravity
 import android.view.GestureDetector
+import android.view.DragEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
@@ -109,6 +111,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         "Night", "Single Take", "Food", "Panorama", "Hyperlapse", "Portrait Video"
     )
     private var moreModesOverlay: FrameLayout? = null
+    private var modeEditorOverlay: FrameLayout? = null
+    private data class ModeDragPayload(val mode: String, val sourceGroup: String)
     private val knownCameraModes = listOf(
         "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
         "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
@@ -187,6 +191,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     @Deprecated("Deprecated in Android API; retained for back compatibility.")
     override fun onBackPressed() {
+        if (modeEditorOverlay != null) {
+            closeModeManager()
+            return
+        }
         if (moreModesOverlay != null) {
             closeMoreModes()
             return
@@ -734,7 +742,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val title = TextView(this).apply {
+        header.addView(TextView(this).apply {
             text = "MORE"
             textSize = 14f
             letterSpacing = 0.14f
@@ -743,8 +751,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "sans-serif-medium",
                 android.graphics.Typeface.NORMAL
             )
-        }
-        header.addView(title, LinearLayout.LayoutParams(0, dp(40), 1f))
+        }, LinearLayout.LayoutParams(0, dp(40), 1f))
+
         val closeButton = TextView(this).apply {
             text = "×"
             textSize = 28f
@@ -760,29 +768,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
         }
-        val grid = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        val rows = moreModes.chunked(3)
-        rows.forEach { rowModes ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-            rowModes.forEach { mode ->
-                row.addView(
-                    createModeTile(mode),
-                    LinearLayout.LayoutParams(0, dp(94), 1f)
-                )
-            }
-            repeat(3 - rowModes.size) {
-                row.addView(View(this), LinearLayout.LayoutParams(0, dp(94), 1f))
-            }
-            grid.addView(row)
-        }
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        addModeGridRows(grid, moreModes, editing = false, group = "more")
         if (moreModes.isEmpty()) {
             grid.addView(TextView(this).apply {
-                text = "No additional modes are available."
+                text = "No additional modes. Press + to add modes."
                 textSize = 13f
                 gravity = Gravity.CENTER
                 setTextColor(0xFFBBBBBB.toInt())
@@ -836,22 +826,27 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         moreModesOverlay = overlay
     }
 
-    private fun createModeTile(mode: String): View {
-        val glyph = when (mode) {
-            "Night" -> "☾"
-            "Single Take" -> "◉"
-            "Food" -> "♨"
-            "Panorama" -> "▱"
-            "Super Slow-Mo" -> "≫"
-            "Slow-Mo" -> "»"
-            "Hyperlapse" -> "∞"
-            "Portrait Video" -> "▣"
-            "Portrait" -> "◉"
-            "Photo" -> "▧"
-            "Video" -> "▰"
-            else -> "○"
-        }
-        return LinearLayout(this).apply {
+    private fun modeGlyph(mode: String): String = when (mode) {
+        "Night" -> "☾"
+        "Single Take" -> "◉"
+        "Food" -> "♨"
+        "Panorama" -> "▱"
+        "Super Slow-Mo" -> "≫"
+        "Slow-Mo" -> "»"
+        "Hyperlapse" -> "∞"
+        "Portrait Video" -> "▣"
+        "Portrait" -> "◉"
+        "Photo" -> "▧"
+        "Video" -> "▰"
+        else -> "○"
+    }
+
+    private fun createModeTile(
+        mode: String,
+        editing: Boolean = false,
+        group: String = "more"
+    ): View {
+        val tile = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(dp(4), dp(6), dp(4), dp(6))
@@ -860,10 +855,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             background = android.graphics.drawable.StateListDrawable().apply {
                 val pressed = rounded(0x33444444, 12)
                 addState(intArrayOf(android.R.attr.state_pressed), pressed)
-                addState(intArrayOf(), GradientDrawable().apply { setColor(Color.TRANSPARENT) })
+                addState(intArrayOf(), GradientDrawable().apply {
+                    setColor(Color.TRANSPARENT)
+                })
             }
             addView(TextView(this@MainActivity).apply {
-                text = glyph
+                text = modeGlyph(mode)
                 textSize = 30f
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
@@ -884,7 +881,47 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(24)
             ))
-            setOnClickListener {
+        }
+
+        if (editing) {
+            tile.contentDescription = "Drag $mode to rearrange camera modes"
+            tile.setOnLongClickListener {
+                val payload = ModeDragPayload(mode, group)
+                val clip = ClipData.newPlainText("camera-mode", mode)
+                @Suppress("DEPRECATION")
+                tile.startDrag(
+                    clip,
+                    View.DragShadowBuilder(tile),
+                    payload,
+                    0
+                )
+            }
+            tile.setOnDragListener { target, event ->
+                when (event.action) {
+                    DragEvent.ACTION_DRAG_STARTED -> event.localState is ModeDragPayload
+                    DragEvent.ACTION_DRAG_ENTERED -> {
+                        target.alpha = 0.55f
+                        true
+                    }
+                    DragEvent.ACTION_DRAG_EXITED -> {
+                        target.alpha = 1f
+                        true
+                    }
+                    DragEvent.ACTION_DROP -> {
+                        target.alpha = 1f
+                        val payload = event.localState as? ModeDragPayload
+                        if (payload != null) moveCameraMode(payload, group, mode)
+                        true
+                    }
+                    DragEvent.ACTION_DRAG_ENDED -> {
+                        target.alpha = 1f
+                        true
+                    }
+                    else -> true
+                }
+            }
+        } else {
+            tile.setOnClickListener {
                 activeMode = mode
                 activePrimaryMode = if (mode in primaryModes) mode else "More"
                 closeMoreModes()
@@ -892,12 +929,69 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (mode != "Photo") {
                     Toast.makeText(
                         this@MainActivity,
-                        "$mode mode is not implemented yet.",
+                        "$mode mode is not implemented in this build yet.",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
             }
         }
+        return tile
+    }
+
+    private fun addModeGridRows(
+        container: LinearLayout,
+        modes: List<String>,
+        editing: Boolean,
+        group: String
+    ) {
+        modes.chunked(3).forEach { rowModes ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
+            rowModes.forEach { mode ->
+                row.addView(
+                    createModeTile(mode, editing, group),
+                    LinearLayout.LayoutParams(0, dp(94), 1f)
+                )
+            }
+            repeat(3 - rowModes.size) {
+                row.addView(View(this), LinearLayout.LayoutParams(0, dp(94), 1f))
+            }
+            container.addView(row)
+        }
+    }
+
+    private fun moveCameraMode(
+        payload: ModeDragPayload,
+        destinationGroup: String,
+        targetMode: String?
+    ) {
+        val source = if (payload.sourceGroup == "main") primaryModes else moreModes
+        val destination = if (destinationGroup == "main") primaryModes else moreModes
+
+        if (payload.mode !in source) return
+        source.remove(payload.mode)
+
+        if (destinationGroup == "main") {
+            destination.remove("More")
+        }
+        val insertAt = if (targetMode == null) {
+            destination.size
+        } else {
+            destination.indexOf(targetMode).takeIf { it >= 0 } ?: destination.size
+        }
+        destination.add(insertAt.coerceIn(0, destination.size), payload.mode)
+
+        if (destinationGroup == "main") {
+            destination.remove("More")
+            destination.add("More")
+        }
+        if (primaryModes.none { it != "More" }) {
+            primaryModes.add(0, "Photo")
+        }
+        saveCameraModeConfiguration()
+        showModeManager()
     }
 
     private fun closeMoreModes() {
@@ -905,134 +999,136 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         moreModesOverlay = null
     }
 
+    private fun closeModeManager() {
+        modeEditorOverlay?.let { root.removeView(it) }
+        modeEditorOverlay = null
+        saveCameraModeConfiguration()
+        if (activePrimaryMode !in primaryModes) activePrimaryMode = "More"
+        rebuildModeStrip()
+        showMoreModes()
+    }
+
     private fun showModeManager() {
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(8))
+        modeEditorOverlay?.let { root.removeView(it) }
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(0xFF101010.toInt())
         }
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(14))
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "Edit camera modes"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        val done = TextView(this).apply {
+            text = "DONE"
+            textSize = 13f
+            letterSpacing = 0.08f
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFD54F.toInt())
+            isClickable = true
+            setOnClickListener { closeModeManager() }
+        }
+        header.addView(done, LinearLayout.LayoutParams(dp(64), dp(52)))
+        screen.addView(header)
+
+        screen.addView(TextView(this).apply {
+            text = "Touch and hold a mode, then drag it between sections or to change its position."
+            textSize = 12f
+            setTextColor(0xFFBDBDBD.toInt())
+            setPadding(0, 0, 0, dp(12))
+        })
+
         val scroll = android.widget.ScrollView(this).apply {
             isFillViewport = true
-            addView(content)
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
-        lateinit var dialog: AlertDialog
-        lateinit var render: () -> Unit
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
 
-        fun addSectionHeader(label: String) {
-            content.addView(TextView(this).apply {
-                text = label
+        fun addSection(title: String, modes: List<String>, group: String) {
+            val section = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(8), 0, dp(12))
+            }
+            section.addView(TextView(this).apply {
+                text = title.uppercase(Locale.ROOT)
                 textSize = 11f
-                letterSpacing = 0.12f
+                letterSpacing = 0.14f
                 setTextColor(0xFFFFD54F.toInt())
                 typeface = android.graphics.Typeface.create(
                     "sans-serif-medium",
                     android.graphics.Typeface.NORMAL
                 )
-                setPadding(0, dp(14), 0, dp(8))
+                setPadding(0, dp(8), 0, dp(8))
             })
-        }
 
-        fun actionButton(label: String, action: () -> Unit): TextView {
-            return TextView(this).apply {
-                text = label
-                textSize = 12f
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                setPadding(dp(9), dp(7), dp(9), dp(7))
-                background = rounded(0xFF303030.toInt(), 8)
-                isClickable = true
-                setOnClickListener { action() }
-            }
-        }
-
-        fun addModeRows(items: MutableList<String>, isMain: Boolean) {
-            items.forEachIndexed { index, mode ->
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(3), 0, dp(3))
-                }
-                row.addView(TextView(this).apply {
-                    text = mode
-                    textSize = 13f
-                    setTextColor(Color.WHITE)
-                    gravity = Gravity.CENTER_VERTICAL
-                }, LinearLayout.LayoutParams(0, dp(44), 1f))
-
-                val sourceList = if (isMain) primaryModes else moreModes
-                if (index > 0) {
-                    row.addView(actionButton("↑") {
-                        val item = sourceList.removeAt(index)
-                        sourceList.add(index - 1, item)
-                        saveCameraModeConfiguration()
-                        render()
-                    }, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
-                        marginEnd = dp(4)
-                    })
-                }
-                if (index < items.lastIndex) {
-                    row.addView(actionButton("↓") {
-                        val item = sourceList.removeAt(index)
-                        sourceList.add(index + 1, item)
-                        saveCameraModeConfiguration()
-                        render()
-                    }, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
-                        marginEnd = dp(4)
-                    })
-                }
-                row.addView(actionButton(if (isMain) "More" else "Add") {
-                    if (isMain) {
-                        if (items.size <= 1) {
-                            Toast.makeText(this@MainActivity, "Keep at least one mode on the camera bar.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            primaryModes.remove(mode)
-                            moreModes.add(mode)
-                            if (activePrimaryMode == mode) activePrimaryMode = "More"
+            val grid = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(5), dp(4), dp(5), dp(4))
+                background = rounded(0xFF1C1C1C.toInt(), 14)
+                setOnDragListener { _, event ->
+                    when (event.action) {
+                        DragEvent.ACTION_DRAG_STARTED -> event.localState is ModeDragPayload
+                        DragEvent.ACTION_DROP -> {
+                            val payload = event.localState as? ModeDragPayload
+                            if (payload != null) moveCameraMode(payload, group, null)
+                            true
                         }
-                    } else {
-                        if (primaryModes.count { it != "More" } >= 6) {
-                            Toast.makeText(this@MainActivity, "The camera bar is full. Move a mode to More first.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            moreModes.remove(mode)
-                            primaryModes.remove("More")
-                            primaryModes.add(mode)
-                            primaryModes.add("More")
-                        }
+                        else -> true
                     }
-                    saveCameraModeConfiguration()
-                    render()
-                }, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    dp(36)
-                ))
-                content.addView(row)
+                }
             }
+            addModeGridRows(grid, modes, editing = true, group = group)
+            if (modes.isEmpty()) {
+                grid.addView(TextView(this).apply {
+                    text = "Drop modes here"
+                    textSize = 12f
+                    gravity = Gravity.CENTER
+                    setTextColor(0xFF888888.toInt())
+                    setPadding(0, dp(26), 0, dp(26))
+                })
+            }
+            section.addView(grid)
+            content.addView(section)
         }
 
-        render = {
-            content.removeAllViews()
-            addSectionHeader("ON CAMERA SCREEN")
-            addModeRows(primaryModes.filter { it != "More" }.toMutableList(), true)
-            addSectionHeader("IN MORE")
-            addModeRows(moreModes, false)
-        }
-
-        dialog = AlertDialog.Builder(this)
-            .setTitle("Manage camera modes")
-            .setView(scroll)
-            .setPositiveButton("Done", null)
-            .create()
-        dialog.setOnDismissListener {
-            saveCameraModeConfiguration()
-            if (activePrimaryMode !in primaryModes) activePrimaryMode = "More"
-            rebuildModeStrip()
-            updatePrimaryModeLabels()
-        }
-        render()
-        dialog.show()
-        dialog.window?.setLayout(
-            (resources.displayMetrics.widthPixels * 0.94f).toInt(),
-            dp(520)
+        addSection("Camera", primaryModes.filter { it != "More" }, "main")
+        addSection("More", moreModes, "more")
+        scroll.addView(content)
+        screen.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
         )
+        overlay.addView(
+            screen,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        modeEditorOverlay = overlay
     }
 
     private fun showMotionPhotoInfo() {
@@ -1521,54 +1617,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        val mediaId = try {
-            ContentUris.parseId(latestPhotoUri)
-        } catch (_: Exception) {
-            -1L
-        }
-        if (mediaId > 0L) {
-            val samsungUri = Uri.parse("content://secmedia/media/$mediaId")
-            val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
-                setComponent(
-                    ComponentName(
-                        "com.sec.android.gallery3d",
-                        "com.sec.android.gallery3d.app.GalleryActivity"
-                    )
+        // MediaStore IDs and Samsung's private "secmedia" IDs are different
+        // namespaces. Pass the original, valid MediaStore URI instead of
+        // manufacturing content://secmedia/media/<MediaStore _ID>.
+        val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
+            setComponent(
+                ComponentName(
+                    "com.sec.android.gallery3d",
+                    "com.sec.android.gallery3d.app.GalleryActivity"
                 )
-                setDataAndType(samsungUri, "image/*")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            try {
-                startActivity(samsungIntent)
-                return
-            } catch (_: Exception) {
-                // Fall through to the standard MediaStore item URI.
-            }
+            )
+            setDataAndType(latestPhotoUri, "image/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
         try {
-            val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
-                setComponent(
-                    ComponentName(
-                        "com.sec.android.gallery3d",
-                        "com.sec.android.gallery3d.app.GalleryActivity"
-                    )
-                )
-                setDataAndType(latestPhotoUri, "image/*")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            startActivity(fallbackIntent)
+            startActivity(samsungIntent)
+            return
         } catch (_: Exception) {
-            try {
-                startActivity(
-                    Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(latestPhotoUri, "image/*")
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                )
-            } catch (_: Exception) {
-                Toast.makeText(this, "Couldn't open the latest camera photo.", Toast.LENGTH_SHORT).show()
-            }
+            // Try the same valid item URI with Android's default image viewer.
+        }
+
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(latestPhotoUri, "image/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            )
+        } catch (_: Exception) {
+            Toast.makeText(this, "Couldn't open the latest camera photo.", Toast.LENGTH_SHORT).show()
         }
     }
 
