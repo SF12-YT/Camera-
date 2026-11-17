@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentValues
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -64,12 +65,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var shutterRow: LinearLayout
     private lateinit var statusHint: TextView
 
-    private lateinit var settingsButton: TextView
-    private lateinit var flashButton: TextView
-    private lateinit var aspectButton: TextView
-    private lateinit var timerButton: TextView
-    private lateinit var motionPhotoButton: TextView
-    private lateinit var filterButton: TextView
+    private lateinit var settingsButton: CameraIconButton
+    private lateinit var flashButton: CameraIconButton
+    private lateinit var aspectButton: CameraIconButton
+    private lateinit var timerButton: CameraIconButton
+    private lateinit var motionPhotoButton: CameraIconButton
+    private lateinit var filterButton: CameraIconButton
     private lateinit var galleryThumbnail: ImageView
     private lateinit var galleryPlaceholder: TextView
     private lateinit var shutterButton: FrameLayout
@@ -134,6 +135,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onResume() {
         super.onResume()
         startCameraThread()
+        if (::galleryThumbnail.isInitialized) loadLatestCameraThumbnail()
         if (hasCameraPermission()) {
             if (previewView.isAvailable) openCamera()
         } else {
@@ -197,38 +199,38 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         topPanel = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(9), dp(12), 0)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(10), dp(8), 0)
         }
-        settingsButton = quickControl("⚙") { showSettings() }.apply {
-            textSize = 24f
-            contentDescription = "Settings"
-        }
-        topPanel.addView(settingsButton, LinearLayout.LayoutParams(0, dp(48), 1f))
 
         quickControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        flashButton = quickControl("⚡") { cycleFlash() }.apply {
-            contentDescription = "Flash auto"
-        }
-        timerButton = quickControl("◷") { cycleTimer() }.apply {
-            contentDescription = "Timer off"
-        }
-        aspectButton = quickControl(aspectRatio) { showAspectRatioPicker() }.apply {
-            contentDescription = "Photo size"
-        }
-        motionPhotoButton = quickControl("▣") { showMotionPhotoInfo() }.apply {
-            contentDescription = "Motion photo"
-        }
-        filterButton = quickControl("✧") { showFilterPicker() }.apply {
-            contentDescription = "Filters"
-        }
-        listOf(flashButton, timerButton, aspectButton, motionPhotoButton, filterButton).forEach { control ->
+        settingsButton = iconControl("settings", "Settings") { showSettings() }
+        flashButton = iconControl("flash", "Flash auto") { cycleFlash() }
+        timerButton = iconControl("timer", "Timer off") { cycleTimer() }
+        aspectButton = iconControl("ratio", "Photo size") { showAspectRatioPicker() }
+        motionPhotoButton = iconControl("motion", "Motion Photo") { showMotionPhotoInfo() }
+        filterButton = iconControl("filters", "Filters") { showFilterPicker() }
+
+        listOf(
+            settingsButton,
+            flashButton,
+            timerButton,
+            aspectButton,
+            motionPhotoButton,
+            filterButton
+        ).forEach { control ->
             quickControls.addView(control, weightedControl())
         }
-        topPanel.addView(quickControls, LinearLayout.LayoutParams(0, dp(48), 5f))
+        topPanel.addView(
+            quickControls,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+            )
+        )
         root.addView(
             topPanel,
             FrameLayout.LayoutParams(
@@ -285,11 +287,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             modeRow.addView(
                 label,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)
-                ).apply {
-                    marginStart = dp(3)
-                    marginEnd = dp(3)
+                LinearLayout.LayoutParams(0, dp(42), 1f).apply {
+                    marginStart = dp(2)
+                    marginEnd = dp(2)
                 }
             )
             labels[mode] = label
@@ -298,7 +298,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         modeScroll.addView(
             modeRow,
             FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
@@ -636,8 +636,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun updateFilterButton() {
         if (!::filterButton.isInitialized) return
         val effect = availableEffects().firstOrNull { it.first == selectedEffectMode }?.second ?: "Original"
-        filterButton.text = "✧"
         filterButton.contentDescription = "Filter: $effect"
+        filterButton.invalidate()
     }
 
     private fun applyFilter(builder: CaptureRequest.Builder) {
@@ -649,23 +649,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun quickControl(text: String, action: () -> Unit): TextView {
-        return TextView(this).apply {
-            this.text = text
-            textSize = if (text == "3:4") 15f else 23f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { action() }
+    private fun iconControl(
+        icon: String,
+        description: String,
+        action: () -> Unit
+    ): CameraIconButton {
+        return CameraIconButton(this, icon, action).apply {
+            contentDescription = description
         }
     }
 
-    private fun weightedControl() = LinearLayout.LayoutParams(0, dp(48), 1f).apply {
-        marginStart = dp(1)
-        marginEnd = dp(1)
-    }
+    private fun weightedControl() = LinearLayout.LayoutParams(0, dp(52), 1f)
 
     private fun cycleFlash() {
         val available = cameraCharacteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
@@ -680,12 +674,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun updateFlashButton() {
         if (!::flashButton.isInitialized) return
-        flashButton.text = if (flashMode == 2) "ϟ" else "⚡"
         flashButton.contentDescription = when (flashMode) {
             0 -> "Flash auto"
             1 -> "Flash on"
             else -> "Flash off"
         }
+        flashButton.invalidate()
     }
 
     private fun cycleTimer() {
@@ -699,11 +693,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun updateTimerButton() {
         if (!::timerButton.isInitialized) return
-        timerButton.text = "◷"
         timerButton.contentDescription = when (timerSeconds) {
             0 -> "Timer off"
             else -> "Timer ${timerSeconds} seconds"
         }
+        timerButton.invalidate()
     }
 
     private fun showAspectRatioPicker() {
@@ -738,8 +732,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             bottomGradientView.visibility = if (isFull) View.GONE else View.VISIBLE
         }
         if (::aspectButton.isInitialized) {
-            aspectButton.text = aspectRatio
             aspectButton.contentDescription = "Photo size: $aspectRatio"
+            aspectButton.invalidate()
         }
     }
 
@@ -895,6 +889,63 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         zoomRatio = value.coerceIn(bounds.first, bounds.second)
         setZoomButtons()
         startPreviewRepeating()
+    }
+
+    private fun showGalleryThumbnail(uri: Uri) {
+        if (!::galleryThumbnail.isInitialized) return
+        galleryThumbnail.setImageURI(uri)
+        galleryPlaceholder.visibility = View.GONE
+    }
+
+    private fun loadLatestCameraThumbnail() {
+        Thread {
+            var latestUri: Uri? = null
+            try {
+                val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                val projection = arrayOf(
+                    MediaStore.Images.Media._ID,
+                    MediaStore.Images.Media.DATE_ADDED
+                )
+                val selection: String
+                val selectionArgs: Array<String>
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    selection = "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND ${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"
+                    selectionArgs = arrayOf(
+                        Environment.DIRECTORY_PICTURES + "/Camera/",
+                        "Camera_%"
+                    )
+                } else {
+                    selection = "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"
+                    selectionArgs = arrayOf("Camera_%")
+                }
+
+                contentResolver.query(
+                    collection,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    "${MediaStore.Images.Media.DATE_ADDED} DESC, ${MediaStore.Images.Media._ID} DESC"
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val id = cursor.getLong(
+                            cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                        )
+                        latestUri = ContentUris.withAppendedId(collection, id)
+                    }
+                }
+            } catch (_: Exception) {
+                // The gallery placeholder remains visible if the media index cannot be queried.
+            }
+
+            latestUri?.let { uri ->
+                mainHandler.post {
+                    if (!isFinishing && ::galleryThumbnail.isInitialized) {
+                        lastPhotoUri = uri
+                        showGalleryThumbnail(uri)
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun openLastPhoto() {
@@ -1199,8 +1250,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             lastPhotoUri = uri
             runOnUiThread {
-                galleryThumbnail.setImageURI(uri)
-                galleryPlaceholder.visibility = View.GONE
+                showGalleryThumbnail(uri)
                 Toast.makeText(this, "Photo saved to Pictures/Camera", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
@@ -1321,6 +1371,192 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun textDrawablePlaceholder(): GradientDrawable = GradientDrawable().apply {
         setColor(0x66555555)
         cornerRadius = dp(8).toFloat()
+    }
+
+    private inner class CameraIconButton(
+        context: Context,
+        private val icon: String,
+        private val onPressed: () -> Unit
+    ) : View(context) {
+
+        private val iconPaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = Color.WHITE
+            strokeWidth = 1.75f
+            strokeCap = android.graphics.Paint.Cap.ROUND
+            strokeJoin = android.graphics.Paint.Join.ROUND
+            style = android.graphics.Paint.Style.STROKE
+        }
+
+        init {
+            isClickable = true
+            isFocusable = true
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
+            val out = android.util.TypedValue()
+            if (context.theme.resolveAttribute(
+                    android.R.attr.selectableItemBackgroundBorderless,
+                    out,
+                    true
+                )
+            ) {
+                setBackgroundResource(out.resourceId)
+            }
+            setOnClickListener { onPressed() }
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            val iconSize = dp(24).toFloat()
+            canvas.save()
+            canvas.translate(
+                (width - iconSize) / 2f,
+                (height - iconSize) / 2f
+            )
+            canvas.scale(iconSize / 24f, iconSize / 24f)
+            iconPaint.color = Color.WHITE
+            iconPaint.strokeWidth = 1.65f
+
+            when (icon) {
+                "settings" -> drawSettings(canvas)
+                "flash" -> drawFlash(canvas)
+                "timer" -> drawTimer(canvas)
+                "ratio" -> drawRatio(canvas)
+                "motion" -> drawMotion(canvas)
+                "filters" -> drawFilters(canvas)
+                "gallery" -> drawGallery(canvas)
+            }
+            canvas.restore()
+        }
+
+        private fun drawSettings(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.STROKE
+            for (angle in 0 until 8) {
+                val radians = Math.toRadians(angle * 45.0)
+                val inner = 8.7f
+                val outer = 10.8f
+                canvas.drawLine(
+                    (12f + kotlin.math.cos(radians).toFloat() * inner),
+                    (12f + kotlin.math.sin(radians).toFloat() * inner),
+                    (12f + kotlin.math.cos(radians).toFloat() * outer),
+                    (12f + kotlin.math.sin(radians).toFloat() * outer),
+                    p
+                )
+            }
+            canvas.drawCircle(12f, 12f, 8.2f, p)
+            canvas.drawCircle(12f, 12f, 2.5f, p)
+        }
+
+        private fun drawFlash(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.FILL
+            val bolt = android.graphics.Path().apply {
+                moveTo(13.4f, 1.5f)
+                lineTo(5.8f, 13.2f)
+                lineTo(10.5f, 13.2f)
+                lineTo(9.3f, 22.5f)
+                lineTo(18.3f, 9.8f)
+                lineTo(13.5f, 9.8f)
+                close()
+            }
+            canvas.drawPath(bolt, p)
+            if (flashMode == 2) {
+                p.style = android.graphics.Paint.Style.STROKE
+                p.strokeWidth = 2f
+                canvas.drawLine(3f, 21f, 21f, 3f, p)
+            }
+        }
+
+        private fun drawTimer(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.STROKE
+            canvas.drawCircle(12f, 13f, 8.5f, p)
+            canvas.drawLine(12f, 1.5f, 12f, 4f, p)
+            canvas.drawLine(9.5f, 1.5f, 14.5f, 1.5f, p)
+            canvas.drawLine(12f, 13f, 12f, 7.5f, p)
+            canvas.drawLine(12f, 13f, 16f, 15f, p)
+            if (timerSeconds > 0) {
+                p.style = android.graphics.Paint.Style.FILL
+                p.textAlign = android.graphics.Paint.Align.CENTER
+                p.textSize = 6f
+                canvas.drawText(timerSeconds.toString(), 18.3f, 21.5f, p)
+            }
+        }
+
+        private fun drawRatio(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.STROKE
+            canvas.drawRoundRect(
+                android.graphics.RectF(2f, 4f, 22f, 20f),
+                3f, 3f, p
+            )
+            p.style = android.graphics.Paint.Style.FILL
+            p.textAlign = android.graphics.Paint.Align.CENTER
+            p.textSize = if (aspectRatio.length > 3) 6.2f else 7.6f
+            val text = when (aspectRatio) {
+                "Full" -> "FULL"
+                else -> aspectRatio
+            }
+            canvas.drawText(text, 12f, 14.6f, p)
+            p.style = android.graphics.Paint.Style.STROKE
+            canvas.drawLine(6f, 2f, 18f, 2f, p)
+            canvas.drawLine(6f, 22f, 18f, 22f, p)
+        }
+
+        private fun drawMotion(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.STROKE
+            canvas.drawRoundRect(
+                android.graphics.RectF(2.5f, 3f, 21.5f, 21f),
+                3f, 3f, p
+            )
+            p.style = android.graphics.Paint.Style.FILL
+            val play = android.graphics.Path().apply {
+                moveTo(10f, 7.5f)
+                lineTo(16.5f, 12f)
+                lineTo(10f, 16.5f)
+                close()
+            }
+            canvas.drawPath(play, p)
+            p.style = android.graphics.Paint.Style.STROKE
+            canvas.drawArc(
+                android.graphics.RectF(5f, 5f, 19f, 19f),
+                210f, 270f, false, p
+            )
+        }
+
+        private fun drawFilters(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.STROKE
+            p.strokeWidth = 1.6f
+            canvas.drawLine(5f, 19f, 18f, 6f, p)
+            canvas.drawLine(14f, 4f, 14f, 9f, p)
+            canvas.drawLine(11.5f, 6.5f, 16.5f, 6.5f, p)
+            canvas.drawLine(5f, 3f, 5f, 8f, p)
+            canvas.drawLine(2.5f, 5.5f, 7.5f, 5.5f, p)
+            canvas.drawLine(19f, 14f, 19f, 19f, p)
+            canvas.drawLine(16.5f, 16.5f, 21.5f, 16.5f, p)
+        }
+
+        private fun drawGallery(canvas: android.graphics.Canvas) {
+            val p = iconPaint
+            p.style = android.graphics.Paint.Style.STROKE
+            canvas.drawRoundRect(
+                android.graphics.RectF(3f, 4f, 21f, 20f),
+                2.5f, 2.5f, p
+            )
+            canvas.drawCircle(8f, 9f, 1.5f, p)
+            val mountain = android.graphics.Path().apply {
+                moveTo(4.5f, 17f)
+                lineTo(9.5f, 12f)
+                lineTo(12.5f, 15f)
+                lineTo(15.5f, 11f)
+                lineTo(19.5f, 16.5f)
+            }
+            canvas.drawPath(mountain, p)
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
