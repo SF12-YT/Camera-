@@ -406,7 +406,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         shutterRow.addView(shutterButton, LinearLayout.LayoutParams(dp(82), dp(82)))
 
         val switchContainer = FrameLayout(this)
-        val switchContainer = FrameLayout(this)
         val switchSlot = FrameLayout(this).apply {
             background = oval(0x55333333)
             isClickable = false
