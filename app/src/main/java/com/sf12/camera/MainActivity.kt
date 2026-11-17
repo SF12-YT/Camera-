@@ -25,6 +25,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.storage.StorageManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -108,13 +109,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var gestureHadMultiplePointers = false
     private var primaryModes = mutableListOf("Portrait", "Photo", "Video", "More")
     private var moreModes = mutableListOf(
-        "Night", "Single Take", "Food", "Panorama", "Hyperlapse", "Portrait Video"
+        "Pro Video", "Single Take", "Night", "Food", "Panorama",
+        "Hyperlapse", "Portrait Video"
     )
     private var moreModesOverlay: FrameLayout? = null
     private var modeEditorOverlay: FrameLayout? = null
     private data class ModeDragPayload(val mode: String, val sourceGroup: String)
+    private data class CameraStorageLocation(
+        val volumeName: String,
+        val label: String,
+        val isRemovable: Boolean
+    )
     private val knownCameraModes = listOf(
-        "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
+        "Portrait", "Photo", "Video", "Pro Video", "Night", "Single Take", "Food",
         "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
     )
     private var lastPhotoUri: Uri? = null
@@ -401,7 +408,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         shutterRow.addView(gallerySlot, LinearLayout.LayoutParams(0, dp(82), 1f))
 
         shutterButton = FrameLayout(this).apply {
-            background = ovalStroke(Color.WHITE, dp(3))
+            background = null
             isClickable = true
             isFocusable = true
             contentDescription = "Take photo"
@@ -580,7 +587,103 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 selectTab(profiles[which])
                 dialog.dismiss()
             }
+            .setNeutralButton("Storage") { _, _ -> showStorageLocationPicker() }
             .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun availableCameraStorageLocations(): List<CameraStorageLocation> {
+        val primary = CameraStorageLocation(
+            MediaStore.VOLUME_EXTERNAL_PRIMARY,
+            "Internal storage",
+            false
+        )
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return listOf(primary)
+        }
+
+        val availableVolumeNames = try {
+            MediaStore.getExternalVolumeNames(this)
+        } catch (_: Exception) {
+            emptySet<String>()
+        }
+
+        val locations = mutableListOf<CameraStorageLocation>()
+        if (MediaStore.VOLUME_EXTERNAL_PRIMARY in availableVolumeNames) {
+            locations.add(primary)
+        }
+
+        val storageManager = getSystemService(Context.STORAGE_SERVICE) as? StorageManager
+        storageManager?.storageVolumes?.forEach { volume ->
+            if (!volume.isRemovable || volume.state != Environment.MEDIA_MOUNTED) {
+                return@forEach
+            }
+
+            val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                volume.mediaStoreVolumeName
+            } else {
+                volume.uuid?.lowercase(Locale.US)
+            }
+            if (volumeName.isNullOrBlank() ||
+                volumeName !in availableVolumeNames ||
+                locations.any { it.volumeName == volumeName }
+            ) {
+                return@forEach
+            }
+
+            val description = volume.getDescription(this).trim()
+            locations.add(
+                CameraStorageLocation(
+                    volumeName,
+                    description.ifBlank { "SD card" },
+                    true
+                )
+            )
+        }
+
+        if (locations.isEmpty()) locations.add(primary)
+        return locations
+    }
+
+    private fun selectedCameraStorageLocation(): CameraStorageLocation? {
+        val selectedVolume = getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .getString("camera_storage_volume", MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+        return availableCameraStorageLocations()
+            .firstOrNull { it.volumeName == selectedVolume }
+    }
+
+    private fun showStorageLocationPicker() {
+        val locations = availableCameraStorageLocations()
+        val preferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
+        val selectedVolume = preferences.getString(
+            "camera_storage_volume",
+            MediaStore.VOLUME_EXTERNAL_PRIMARY
+        )
+        val selectedIndex = locations.indexOfFirst { it.volumeName == selectedVolume }
+            .coerceAtLeast(0)
+        val labels = locations.map { location ->
+            "\${location.label}  ·  DCIM/Camera"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Save photos to")
+            .setMessage("Choose where new photos and the Camera roll are stored.")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                val location = locations[which]
+                preferences.edit()
+                    .putString("camera_storage_volume", location.volumeName)
+                    .apply()
+                lastPhotoUri = null
+                loadLatestCameraThumbnail()
+                Toast.makeText(
+                    this,
+                    "Saving to \${location.label}/DCIM/Camera",
+                    Toast.LENGTH_SHORT
+                ).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -610,7 +713,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         val availableBaseModes = listOf(
-            "Portrait", "Photo", "Video", "Night", "Single Take",
+            "Portrait", "Photo", "Video", "Pro Video", "Night", "Single Take",
             "Food", "Panorama", "Hyperlapse", "Portrait Video"
         )
         availableBaseModes.forEach { mode ->
@@ -719,7 +822,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         closeMoreModes()
 
         val overlay = FrameLayout(this).apply {
-            setBackgroundColor(0x22000000)
+            setBackgroundColor(0x33000000)
             setOnClickListener { closeMoreModes() }
         }
         val panel = LinearLayout(this).apply {
@@ -727,7 +830,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(18), dp(14), dp(18), dp(14))
             background = GradientDrawable().apply {
-                setColor(0xF0121212.toInt())
+                // 20% opaque black (approximately 80% transparent), allowing
+                // the live camera preview to remain visible underneath.
+                setColor(0x33000000)
                 cornerRadii = floatArrayOf(
                     dp(18f).toFloat(), dp(18f).toFloat(),
                     dp(18f).toFloat(), dp(18f).toFloat(),
@@ -763,6 +868,43 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         header.addView(closeButton, LinearLayout.LayoutParams(dp(44), dp(40)))
         panel.addView(header)
+
+        val bixbyVisionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Bixby Vision is not available in this build yet.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "◎"
+                textSize = 25f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+            }, LinearLayout.LayoutParams(dp(38), dp(42)))
+            addView(TextView(this@MainActivity).apply {
+                text = "BIXBY VISION"
+                textSize = 11f
+                letterSpacing = 0.05f
+                gravity = Gravity.CENTER_VERTICAL
+                setTextColor(Color.WHITE)
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(42)
+            ))
+        }
+        panel.addView(
+            bixbyVisionRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(46)
+            )
+        )
 
         val scroll = android.widget.ScrollView(this).apply {
             isFillViewport = true
@@ -812,7 +954,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             panel,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(400),
+                dp(460),
                 Gravity.BOTTOM
             )
         )
@@ -827,6 +969,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun modeGlyph(mode: String): String = when (mode) {
+        "Pro Video" -> "▣"
         "Night" -> "☾"
         "Single Take" -> "◉"
         "Food" -> "♨"
@@ -1512,54 +1655,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun loadLatestCameraThumbnail() {
         Thread {
-            var latestUri: Uri? = null
-            try {
-                val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                val projection = arrayOf(
-                    MediaStore.Images.Media._ID,
-                    MediaStore.Images.Media.DATE_ADDED,
-                    MediaStore.Images.Media.MIME_TYPE
-                )
-                val selection: String
-                val selectionArgs: Array<String>
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-                    selectionArgs = arrayOf(
-                        Environment.DIRECTORY_DCIM + "/Camera/%",
-                        Environment.DIRECTORY_PICTURES + "/Camera/%"
-                    )
-                } else {
-                    selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
-                    selectionArgs = arrayOf("Camera")
-                }
-
-                contentResolver.query(
-                    collection,
-                    projection,
-                    selection,
-                    selectionArgs,
-                    "${MediaStore.Images.Media.DATE_ADDED} DESC, ${MediaStore.Images.Media._ID} DESC"
-                )?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val id = cursor.getLong(
-                            cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                        )
-                        latestUri = ContentUris.withAppendedId(collection, id)
-                        val mimeIndex = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
-                        if (mimeIndex >= 0 && !cursor.isNull(mimeIndex)) {
-                            lastPhotoMimeType = cursor.getString(mimeIndex)
+            val latestUri = findLatestCameraPhotoUri()
+            mainHandler.post {
+                if (!isFinishing && ::galleryThumbnail.isInitialized) {
+                    lastPhotoUri = latestUri
+                    if (latestUri != null) {
+                        try {
+                            lastPhotoMimeType = contentResolver.getType(latestUri) ?: "image/jpeg"
+                        } catch (_: Exception) {
+                            lastPhotoMimeType = "image/jpeg"
                         }
-                    }
-                }
-            } catch (_: Exception) {
-                // The gallery placeholder remains visible if the media index cannot be queried.
-            }
-
-            latestUri?.let { uri ->
-                mainHandler.post {
-                    if (!isFinishing && ::galleryThumbnail.isInitialized) {
-                        lastPhotoUri = uri
-                        showGalleryThumbnail(uri)
+                        showGalleryThumbnail(latestUri)
+                    } else {
+                        galleryThumbnail.setImageDrawable(textDrawablePlaceholder())
+                        galleryPlaceholder.visibility = View.VISIBLE
                     }
                 }
             }
@@ -1568,18 +1677,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun findLatestCameraPhotoUri(): Uri? {
         return try {
-            val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            val storage = selectedCameraStorageLocation() ?: return null
+            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Images.Media.getContentUri(storage.volumeName)
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
             val projection = arrayOf(MediaStore.Images.Media._ID)
             val selection: String
             val selectionArgs: Array<String>
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                selection = "(${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
+                selection = "(\${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
+                    "\${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
+                    "\${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
                 selectionArgs = arrayOf(
-                    Environment.DIRECTORY_DCIM + "/Camera/%",
-                    Environment.DIRECTORY_PICTURES + "/Camera/%"
+                    Environment.DIRECTORY_DCIM + "/Camera",
+                    Environment.DIRECTORY_DCIM + "/Camera/",
+                    Environment.DIRECTORY_DCIM + "/Camera/%"
                 )
             } else {
-                selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+                selection = "\${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
                 selectionArgs = arrayOf("Camera")
             }
 
@@ -1588,7 +1705,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 projection,
                 selection,
                 selectionArgs,
-                "${MediaStore.Images.Media.DATE_ADDED} DESC, ${MediaStore.Images.Media._ID} DESC"
+                "\${MediaStore.Images.Media.DATE_ADDED} DESC, " +
+                    "\${MediaStore.Images.Media.DATE_MODIFIED} DESC, " +
+                    "\${MediaStore.Images.Media._ID} DESC"
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val id = cursor.getLong(
@@ -1611,9 +1730,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        val latestPhotoUri = findLatestCameraPhotoUri() ?: lastPhotoUri
+        val selectedStorage = selectedCameraStorageLocation()
+        if (selectedStorage == null) {
+            Toast.makeText(
+                this,
+                "The selected storage is unavailable. Insert the SD card or choose Internal storage in Settings.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val latestPhotoUri = findLatestCameraPhotoUri() ?: lastPhotoUri?.takeIf { uri ->
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                MediaStore.getVolumeName(uri) == selectedStorage.volumeName
+        }
         if (latestPhotoUri == null) {
-            Toast.makeText(this, "No camera photos yet.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No camera photos in ${selectedStorage.label}.", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -1903,7 +2035,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun saveJpeg(bytes: ByteArray) {
+        val storage = selectedCameraStorageLocation()
+        if (storage == null) {
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    "The selected storage is unavailable. Insert the SD card or choose Internal storage in Settings.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            return
+        }
+
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(storage.volumeName)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Camera_$timestamp.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -1915,7 +2064,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         var savedUri: Uri? = null
         try {
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            val uri = contentResolver.insert(collection, values)
                 ?: throw IllegalStateException("Unable to create image entry")
             savedUri = uri
             contentResolver.openOutputStream(uri, "w")?.use { output ->
@@ -1934,7 +2083,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastPhotoMimeType = "image/jpeg"
             runOnUiThread {
                 showGalleryThumbnail(uri)
-                Toast.makeText(this, "Photo saved to DCIM/Camera", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this,
+                    "Photo saved to ${storage.label}/DCIM/Camera",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         } catch (e: Exception) {
             savedUri?.let { contentResolver.delete(it, null, null) }
