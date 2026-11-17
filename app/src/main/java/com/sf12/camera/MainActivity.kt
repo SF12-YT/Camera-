@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.ContentUris
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -103,7 +104,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var selectedEffectMode = CaptureRequest.CONTROL_EFFECT_MODE_OFF
     private var expandedOptionsKind: String? = null
     private var gestureHadMultiplePointers = false
-    private val primaryModes = listOf("Portrait", "Photo", "Video", "More")
+    private var primaryModes = mutableListOf("Portrait", "Photo", "Video", "More")
+    private var moreModes = mutableListOf(
+        "Night", "Single Take", "Food", "Panorama", "Hyperlapse", "Portrait Video"
+    )
+    private var moreModesOverlay: FrameLayout? = null
+    private val knownCameraModes = listOf(
+        "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
+        "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
+    )
     private var lastPhotoUri: Uri? = null
     private var lastPhotoMimeType: String = "image/jpeg"
     private var openingCamera = false
@@ -133,6 +142,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             activeTab = "Basic"
         }
         aspectRatio = preferences.getString("photo_ratio", "3:4") ?: "3:4"
+
+        preferences.getString("primary_camera_modes", null)?.let { saved ->
+            val configured = saved.split("|")
+                .filter { it in knownCameraModes }
+                .distinct()
+                .toMutableList()
+            if (configured.isNotEmpty()) {
+                primaryModes = (configured + "More").toMutableList()
+            }
+        }
+        preferences.getString("more_camera_modes", null)?.let { saved ->
+            moreModes = saved.split("|")
+                .filter { it in knownCameraModes && it !in primaryModes }
+                .distinct()
+                .toMutableList()
+        } ?: run {
+            moreModes = knownCameraModes
+                .filter { it !in primaryModes && it != "Super Slow-Mo" && it != "Slow-Mo" }
+                .toMutableList()
+        }
         buildCameraUi()
     }
 
@@ -158,6 +187,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     @Deprecated("Deprecated in Android API; retained for back compatibility.")
     override fun onBackPressed() {
+        if (moreModesOverlay != null) {
+            closeMoreModes()
+            return
+        }
         if (expandedOptionsKind != null) {
             closeExpandedOptions()
             return
@@ -309,34 +342,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val labels = mutableMapOf<String, TextView>()
-        primaryModes.forEach { mode ->
-            val label = TextView(this).apply {
-                text = mode.uppercase(Locale.ROOT)
-                textSize = 12f
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                isSingleLine = true
-                maxLines = 1
-                setTextColor(0xFFBDBDBD.toInt())
-                setPadding(dp(10), dp(9), dp(10), dp(9))
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { selectMode(mode) }
-            }
-            modeRow.addView(
-                label,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    dp(42)
-                ).apply {
-                    marginStart = dp(5)
-                    marginEnd = dp(5)
-                }
-            )
-            labels[mode] = label
-        }
-        modeLabels = labels
         modeScroll.addView(
             modeRow,
             FrameLayout.LayoutParams(
@@ -344,11 +349,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
-        modeScroll.post {
-            val edgeSpace = modeScroll.width / 2
-            modeRow.setPadding(edgeSpace, 0, edgeSpace, 0)
-            centerSelectedMode()
-        }
+        rebuildModeStrip()
         bottomPanel.addView(
             modeScroll,
             LinearLayout.LayoutParams(
@@ -493,7 +494,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         abs(velocityX) > dp(180)
                     ) {
                         val current = primaryModes.indexOf(activePrimaryMode).coerceAtLeast(0)
-                        val direction = if (deltaX > 0) 1 else -1
+                        val direction = if (deltaX > 0) -1 else 1
                         val next = (current + direction + primaryModes.size) % primaryModes.size
                         selectMode(primaryModes[next])
                         return true
@@ -575,15 +576,106 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             .show()
     }
 
+    private fun saveCameraModeConfiguration() {
+        getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .edit()
+            .putString("primary_camera_modes", primaryModes.filter { it != "More" }.joinToString("|"))
+            .putString("more_camera_modes", moreModes.joinToString("|"))
+            .apply()
+    }
+
+    private fun refreshDeviceSpecificModes() {
+        val streamMap = cameraCharacteristics
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val maximumHighSpeedFps = streamMap?.highSpeedVideoFpsRanges
+            ?.maxOfOrNull { it.upper } ?: 0
+        val supportsSuperSlowMo = maximumHighSpeedFps >= 480
+        val supportsSlowMo = maximumHighSpeedFps >= 120
+
+        if (!supportsSuperSlowMo) {
+            primaryModes.remove("Super Slow-Mo")
+            moreModes.remove("Super Slow-Mo")
+        }
+        if (!supportsSlowMo) {
+            primaryModes.remove("Slow-Mo")
+            moreModes.remove("Slow-Mo")
+        }
+
+        val availableBaseModes = listOf(
+            "Portrait", "Photo", "Video", "Night", "Single Take",
+            "Food", "Panorama", "Hyperlapse", "Portrait Video"
+        )
+        availableBaseModes.forEach { mode ->
+            if (mode !in primaryModes && mode !in moreModes) moreModes.add(mode)
+        }
+        if (supportsSuperSlowMo &&
+            "Super Slow-Mo" !in primaryModes &&
+            "Super Slow-Mo" !in moreModes
+        ) moreModes.add("Super Slow-Mo")
+        if (supportsSlowMo &&
+            "Slow-Mo" !in primaryModes &&
+            "Slow-Mo" !in moreModes
+        ) moreModes.add("Slow-Mo")
+
+        if (primaryModes.none { it != "More" }) {
+            primaryModes.add(0, "Photo")
+        }
+        primaryModes.remove("More")
+        primaryModes.add("More")
+        if (activePrimaryMode !in primaryModes) activePrimaryMode = "More"
+        saveCameraModeConfiguration()
+        if (::modeRow.isInitialized) rebuildModeStrip()
+    }
+
+    private fun rebuildModeStrip() {
+        if (!::modeRow.isInitialized) return
+        modeRow.removeAllViews()
+        val labels = mutableMapOf<String, TextView>()
+        primaryModes.forEach { mode ->
+            val label = TextView(this).apply {
+                text = mode.uppercase(Locale.ROOT)
+                textSize = if (mode == "Portrait") 11f else 12f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                isSingleLine = true
+                maxLines = 1
+                setTextColor(0xFFBDBDBD.toInt())
+                setPadding(dp(9), dp(9), dp(9), dp(9))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { selectMode(mode) }
+            }
+            modeRow.addView(
+                label,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    dp(42)
+                ).apply {
+                    marginStart = dp(4)
+                    marginEnd = dp(4)
+                }
+            )
+            labels[mode] = label
+        }
+        modeLabels = labels
+        modeScroll.post {
+            val edgeSpace = modeScroll.width / 2
+            modeRow.setPadding(edgeSpace, 0, edgeSpace, 0)
+            centerSelectedMode()
+        }
+        updatePrimaryModeLabels()
+    }
+
     private fun selectMode(mode: String) {
-        if (mode !in primaryModes) return
-        activePrimaryMode = mode
         if (mode == "More") {
+            activePrimaryMode = "More"
             updatePrimaryModeLabels()
             showMoreModes()
             return
         }
+        if (mode !in primaryModes) return
 
+        activePrimaryMode = mode
         activeMode = mode
         updatePrimaryModeLabels()
         if (mode != "Photo") {
@@ -616,35 +708,331 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun showMoreModes() {
-        val modes = mutableListOf(
-            "Night",
-            "Single Take",
-            "Food",
-            "Panorama"
-        )
-        val characteristics = cameraCharacteristics
-        val streamMap = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val maximumHighSpeedFps = streamMap?.highSpeedVideoFpsRanges
-            ?.maxOfOrNull { it.upper } ?: 0
-        if (maximumHighSpeedFps >= 480) modes.add("Super Slow-Mo")
-        if (maximumHighSpeedFps >= 120) modes.add("Slow-Mo")
-        modes.add("Hyperlapse")
-        modes.add("Portrait Video")
+        closeMoreModes()
 
-        AlertDialog.Builder(this)
-            .setTitle("More camera modes")
-            .setItems(modes.toTypedArray()) { _, which ->
-                activeMode = modes[which]
-                activePrimaryMode = "More"
-                updatePrimaryModeLabels()
-                Toast.makeText(
-                    this,
-                    "${activeMode} is not implemented in this build yet.",
-                    Toast.LENGTH_SHORT
-                ).show()
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(0x22000000)
+            setOnClickListener { closeMoreModes() }
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            background = GradientDrawable().apply {
+                setColor(0xF0121212.toInt())
+                cornerRadii = floatArrayOf(
+                    dp(18f).toFloat(), dp(18f).toFloat(),
+                    dp(18f).toFloat(), dp(18f).toFloat(),
+                    0f, 0f, 0f, 0f
+                )
             }
-            .setNegativeButton("Close", null)
-            .show()
+            isClickable = true
+            setOnClickListener { }
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val title = TextView(this).apply {
+            text = "MORE"
+            textSize = 14f
+            letterSpacing = 0.14f
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(40), 1f))
+        val closeButton = TextView(this).apply {
+            text = "×"
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setTextColor(0xFFDDDDDD.toInt())
+            isClickable = true
+            setOnClickListener { closeMoreModes() }
+        }
+        header.addView(closeButton, LinearLayout.LayoutParams(dp(44), dp(40)))
+        panel.addView(header)
+
+        val scroll = android.widget.ScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val rows = moreModes.chunked(3)
+        rows.forEach { rowModes ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
+            rowModes.forEach { mode ->
+                row.addView(
+                    createModeTile(mode),
+                    LinearLayout.LayoutParams(0, dp(94), 1f)
+                )
+            }
+            repeat(3 - rowModes.size) {
+                row.addView(View(this), LinearLayout.LayoutParams(0, dp(94), 1f))
+            }
+            grid.addView(row)
+        }
+        if (moreModes.isEmpty()) {
+            grid.addView(TextView(this).apply {
+                text = "No additional modes are available."
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(0xFFBBBBBB.toInt())
+                setPadding(0, dp(24), 0, dp(24))
+            })
+        }
+        scroll.addView(grid)
+        panel.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        )
+
+        val footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        }
+        val addButton = TextView(this).apply {
+            text = "+"
+            textSize = 30f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = oval(0x33444444)
+            contentDescription = "Edit camera modes"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                closeMoreModes()
+                showModeManager()
+            }
+        }
+        footer.addView(addButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        panel.addView(footer)
+
+        overlay.addView(
+            panel,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(400),
+                Gravity.BOTTOM
+            )
+        )
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        moreModesOverlay = overlay
+    }
+
+    private fun createModeTile(mode: String): View {
+        val glyph = when (mode) {
+            "Night" -> "☾"
+            "Single Take" -> "◉"
+            "Food" -> "♨"
+            "Panorama" -> "▱"
+            "Super Slow-Mo" -> "≫"
+            "Slow-Mo" -> "»"
+            "Hyperlapse" -> "∞"
+            "Portrait Video" -> "▣"
+            "Portrait" -> "◉"
+            "Photo" -> "▧"
+            "Video" -> "▰"
+            else -> "○"
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(6), dp(4), dp(6))
+            isClickable = true
+            isFocusable = true
+            background = android.graphics.drawable.StateListDrawable().apply {
+                val pressed = rounded(0x33444444, 12)
+                addState(intArrayOf(android.R.attr.state_pressed), pressed)
+                addState(intArrayOf(), GradientDrawable().apply { setColor(Color.TRANSPARENT) })
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = glyph
+                textSize = 30f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-light",
+                    android.graphics.Typeface.NORMAL
+                )
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+            ))
+            addView(TextView(this@MainActivity).apply {
+                text = mode.uppercase(Locale.ROOT)
+                textSize = 10.5f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                isSingleLine = true
+                setTextColor(0xFFE2E2E2.toInt())
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(24)
+            ))
+            setOnClickListener {
+                activeMode = mode
+                activePrimaryMode = if (mode in primaryModes) mode else "More"
+                closeMoreModes()
+                updatePrimaryModeLabels()
+                if (mode != "Photo") {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "$mode mode is not implemented yet.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun closeMoreModes() {
+        moreModesOverlay?.let { root.removeView(it) }
+        moreModesOverlay = null
+    }
+
+    private fun showModeManager() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val scroll = android.widget.ScrollView(this).apply {
+            isFillViewport = true
+            addView(content)
+        }
+        lateinit var dialog: AlertDialog
+        lateinit var render: () -> Unit
+
+        fun addSectionHeader(label: String) {
+            content.addView(TextView(this).apply {
+                text = label
+                textSize = 11f
+                letterSpacing = 0.12f
+                setTextColor(0xFFFFD54F.toInt())
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.NORMAL
+                )
+                setPadding(0, dp(14), 0, dp(8))
+            })
+        }
+
+        fun actionButton(label: String, action: () -> Unit): TextView {
+            return TextView(this).apply {
+                text = label
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setPadding(dp(9), dp(7), dp(9), dp(7))
+                background = rounded(0xFF303030.toInt(), 8)
+                isClickable = true
+                setOnClickListener { action() }
+            }
+        }
+
+        fun addModeRows(items: MutableList<String>, isMain: Boolean) {
+            items.forEachIndexed { index, mode ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(3), 0, dp(3))
+                }
+                row.addView(TextView(this).apply {
+                    text = mode
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER_VERTICAL
+                }, LinearLayout.LayoutParams(0, dp(44), 1f))
+
+                val list = items
+                if (index > 0) {
+                    row.addView(actionButton("↑") {
+                        val item = list.removeAt(index)
+                        list.add(index - 1, item)
+                        saveCameraModeConfiguration()
+                        render()
+                    }, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
+                        marginEnd = dp(4)
+                    })
+                }
+                if (index < list.lastIndex) {
+                    row.addView(actionButton("↓") {
+                        val item = list.removeAt(index)
+                        list.add(index + 1, item)
+                        saveCameraModeConfiguration()
+                        render()
+                    }, LinearLayout.LayoutParams(dp(38), dp(36)).apply {
+                        marginEnd = dp(4)
+                    })
+                }
+                row.addView(actionButton(if (isMain) "More" else "Add") {
+                    if (isMain) {
+                        if (items.size <= 1) {
+                            Toast.makeText(this@MainActivity, "Keep at least one mode on the camera bar.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            primaryModes.remove(mode)
+                            moreModes.add(mode)
+                            if (activePrimaryMode == mode) activePrimaryMode = "More"
+                        }
+                    } else {
+                        if (primaryModes.count { it != "More" } >= 6) {
+                            Toast.makeText(this@MainActivity, "The camera bar is full. Move a mode to More first.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            moreModes.remove(mode)
+                            primaryModes.remove("More")
+                            primaryModes.add(mode)
+                            primaryModes.add("More")
+                        }
+                    }
+                    saveCameraModeConfiguration()
+                    render()
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    dp(36)
+                ))
+                content.addView(row)
+            }
+        }
+
+        render = {
+            content.removeAllViews()
+            addSectionHeader("ON CAMERA SCREEN")
+            addModeRows(primaryModes.filter { it != "More" }.toMutableList(), true)
+            addSectionHeader("IN MORE")
+            addModeRows(moreModes, false)
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle("Manage camera modes")
+            .setView(scroll)
+            .setPositiveButton("Done", null)
+            .create()
+        dialog.setOnDismissListener {
+            saveCameraModeConfiguration()
+            if (activePrimaryMode !in primaryModes) activePrimaryMode = "More"
+            rebuildModeStrip()
+            updatePrimaryModeLabels()
+        }
+        render()
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.94f).toInt(),
+            dp(520)
+        )
     }
 
     private fun showMotionPhotoInfo() {
@@ -1082,90 +1470,105 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }.start()
     }
 
-    private fun cameraRollAlbumUri(): Uri {
-        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        val bucketProjection = arrayOf("bucket_id")
-        val paths = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            listOf(
-                Environment.DIRECTORY_DCIM + "/Camera/",
-                Environment.DIRECTORY_PICTURES + "/Camera/"
-            )
-        } else {
-            listOf("Camera")
-        }
-
-        for (folder in paths) {
-            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
+    private fun findLatestCameraPhotoUri(): Uri? {
+        return try {
+            val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(MediaStore.Images.Media._ID)
+            val selection: String
+            val selectionArgs: Array<String>
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                selection = "(${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
+                selectionArgs = arrayOf(
+                    Environment.DIRECTORY_DCIM + "/Camera/%",
+                    Environment.DIRECTORY_PICTURES + "/Camera/%"
+                )
             } else {
-                "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+                selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
+                selectionArgs = arrayOf("Camera")
             }
-            try {
-                contentResolver.query(
-                    collection,
-                    bucketProjection,
-                    selection,
-                    arrayOf(folder),
-                    "${MediaStore.Images.Media.DATE_ADDED} DESC"
-                )?.use { cursor ->
-                    if (cursor.moveToFirst() && !cursor.isNull(0)) {
-                        val bucketId = cursor.getString(0)
-                        return collection.buildUpon()
-                            .appendQueryParameter("bucketId", bucketId)
-                            .build()
-                    }
+
+            contentResolver.query(
+                collection,
+                projection,
+                selection,
+                selectionArgs,
+                "${MediaStore.Images.Media.DATE_ADDED} DESC, ${MediaStore.Images.Media._ID} DESC"
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    )
+                    ContentUris.withAppendedId(collection, id)
+                } else {
+                    null
                 }
-            } catch (_: Exception) {
-                // Try the legacy app folder, then the whole image collection.
             }
+        } catch (_: Exception) {
+            null
         }
-        return collection
     }
 
     private fun openLastPhoto() {
         if (!hasGalleryReadPermission()) {
             requestGalleryReadPermission()
-            Toast.makeText(this, "Allow photo access to open the camera roll.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Allow photo access to open the latest camera photo.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val cameraRollUri = cameraRollAlbumUri()
-        val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(cameraRollUri, "vnd.android.cursor.dir/image")
-            setPackage("com.sec.android.gallery3d")
-            putExtra("windowTitle", "Camera")
-            putExtra("mediaTypes", 1) // ImageManager.INCLUDE_IMAGES in Gallery2
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        try {
-            startActivity(samsungIntent)
+        val latestPhotoUri = findLatestCameraPhotoUri() ?: lastPhotoUri
+        if (latestPhotoUri == null) {
+            Toast.makeText(this, "No camera photos yet.", Toast.LENGTH_SHORT).show()
             return
+        }
+
+        val mediaId = try {
+            ContentUris.parseId(latestPhotoUri)
         } catch (_: Exception) {
-            // Non-Samsung gallery apps may not support Samsung's album URI.
+            -1L
         }
-
-        try {
-            startActivity(
-                Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        "vnd.android.cursor.dir/image"
+        if (mediaId > 0L) {
+            val samsungUri = Uri.parse("content://secmedia/media/$mediaId")
+            val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
+                setComponent(
+                    ComponentName(
+                        "com.sec.android.gallery3d",
+                        "com.sec.android.gallery3d.app.GalleryActivity"
                     )
-                    putExtra("mediaTypes", 1)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            )
-        } catch (_: Exception) {
-            val gallery = packageManager.getLaunchIntentForPackage("com.sec.android.gallery3d")
-            if (gallery != null) {
-                try {
-                    startActivity(gallery)
-                    return
-                } catch (_: Exception) {
-                    // Report the absence of an image collection handler below.
-                }
+                )
+                setDataAndType(samsungUri, "image/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            Toast.makeText(this, "No camera-roll app is available.", Toast.LENGTH_SHORT).show()
+            try {
+                startActivity(samsungIntent)
+                return
+            } catch (_: Exception) {
+                // Fall through to the standard MediaStore item URI.
+            }
+        }
+
+        try {
+            val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
+                setComponent(
+                    ComponentName(
+                        "com.sec.android.gallery3d",
+                        "com.sec.android.gallery3d.app.GalleryActivity"
+                    )
+                )
+                setDataAndType(latestPhotoUri, "image/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(fallbackIntent)
+        } catch (_: Exception) {
+            try {
+                startActivity(
+                    Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(latestPhotoUri, "image/*")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                )
+            } catch (_: Exception) {
+                Toast.makeText(this, "Couldn't open the latest camera photo.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -1256,6 +1659,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     cameraDevice = camera
                     cameraCharacteristics = cameraManager.getCameraCharacteristics(id)
                     runOnUiThread {
+                        refreshDeviceSpecificModes()
                         setZoomButtons()
                         updateFlashButton()
                     }
