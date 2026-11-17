@@ -58,6 +58,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var bottomPanel: LinearLayout
     private lateinit var topGradientView: View
     private lateinit var bottomGradientView: View
+    private lateinit var expandedOptionsRow: LinearLayout
     private lateinit var quickControls: LinearLayout
     private lateinit var zoomRow: LinearLayout
     private lateinit var modeScroll: HorizontalScrollView
@@ -100,6 +101,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var zoomRatio = 1.0f
     private var zoomLevels = listOf(1.0f)
     private var selectedEffectMode = CaptureRequest.CONTROL_EFFECT_MODE_OFF
+    private var expandedOptionsKind: String? = null
     private var gestureHadMultiplePointers = false
     private val primaryModes = listOf("Portrait", "Photo", "Video", "More")
     private var lastPhotoUri: Uri? = null
@@ -249,6 +251,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP
             )
+        )
+
+        expandedOptionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        root.addView(
+            expandedOptionsRow,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(52),
+                Gravity.TOP
+            ).apply {
+                topMargin = dp(61)
+            }
         )
 
         bottomPanel = LinearLayout(this).apply {
@@ -671,33 +690,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun weightedControl() = LinearLayout.LayoutParams(0, dp(52), 1f)
 
     private fun cycleFlash() {
-        val available = cameraCharacteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-        if (!available) {
-            Toast.makeText(this, "Flash is not available on this camera.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        flashMode = (flashMode + 1) % 3
-        updateFlashButton()
-        startPreviewRepeating()
+        showFlashOptions()
     }
 
     private fun updateFlashButton() {
         if (!::flashButton.isInitialized) return
         flashButton.contentDescription = when (flashMode) {
-            0 -> "Flash auto"
+            0 -> "Flash automatic"
             1 -> "Flash on"
             else -> "Flash off"
         }
         flashButton.invalidate()
+        if (expandedOptionsKind == "flash") showExpandedOptions("flash", keepOpen = true)
+    }
+
+    private fun showFlashOptions() {
+        showExpandedOptions("flash")
     }
 
     private fun cycleTimer() {
-        timerSeconds = when (timerSeconds) {
-            0 -> 3
-            3 -> 10
-            else -> 0
-        }
-        updateTimerButton()
+        showTimerOptions()
     }
 
     private fun updateTimerButton() {
@@ -707,6 +719,76 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             else -> "Timer ${timerSeconds} seconds"
         }
         timerButton.invalidate()
+        if (expandedOptionsKind == "timer") showExpandedOptions("timer", keepOpen = true)
+    }
+
+    private fun showTimerOptions() {
+        showExpandedOptions("timer")
+    }
+
+    private fun showExpandedOptions(kind: String, keepOpen: Boolean = false) {
+        if (!::expandedOptionsRow.isInitialized) return
+        if (!keepOpen && expandedOptionsKind == kind) {
+            expandedOptionsKind = null
+            expandedOptionsRow.visibility = View.GONE
+            expandedOptionsRow.removeAllViews()
+            return
+        }
+
+        expandedOptionsKind = kind
+        expandedOptionsRow.removeAllViews()
+
+        val options = if (kind == "flash") {
+            listOf("flashOff", "flashAuto", "flashOn")
+        } else {
+            listOf("timerOff", "timer2", "timer5", "timer10")
+        }
+
+        options.forEach { option ->
+            val button = CameraIconButton(this, option) {
+                if (kind == "flash") {
+                    flashMode = when (option) {
+                        "flashOff" -> 2
+                        "flashAuto" -> 0
+                        else -> 1
+                    }
+                    updateFlashButton()
+                    startPreviewRepeating()
+                } else {
+                    timerSeconds = when (option) {
+                        "timer2" -> 2
+                        "timer5" -> 5
+                        "timer10" -> 10
+                        else -> 0
+                    }
+                    updateTimerButton()
+                }
+                expandedOptionsKind = null
+                expandedOptionsRow.visibility = View.GONE
+                expandedOptionsRow.removeAllViews()
+            }.apply {
+                contentDescription = when (option) {
+                    "flashOff" -> "Flash off"
+                    "flashAuto" -> "Flash automatic"
+                    "flashOn" -> "Flash on"
+                    "timerOff" -> "Timer off"
+                    "timer2" -> "2 second timer"
+                    "timer5" -> "5 second timer"
+                    else -> "10 second timer"
+                }
+                val available = cameraCharacteristics
+                    ?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                if (option == "flashOn" && !available) {
+                    isEnabled = false
+                    alpha = 0.35f
+                }
+            }
+            expandedOptionsRow.addView(
+                button,
+                LinearLayout.LayoutParams(0, dp(50), 1f)
+            )
+        }
+        expandedOptionsRow.visibility = View.VISIBLE
     }
 
     private fun showAspectRatioPicker() {
@@ -962,50 +1044,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun openLastPhoto() {
-        if (!hasGalleryReadPermission() && lastPhotoUri == null) {
-            requestGalleryReadPermission()
-            Toast.makeText(this, "Allow photo access to open your latest camera shot.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val uri = lastPhotoUri
-        if (uri != null) {
-            val samsungGalleryIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, lastPhotoMimeType)
-                setPackage("com.sec.android.gallery3d")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
+        // Launch Samsung Gallery without an image URI. Passing ACTION_VIEW with a
+        // single MediaStore item opens only that image instead of the camera roll.
+        val samsungGallery = packageManager.getLaunchIntentForPackage("com.sec.android.gallery3d")
+        if (samsungGallery != null) {
             try {
-                startActivity(samsungGalleryIntent)
+                startActivity(samsungGallery)
                 return
             } catch (_: Exception) {
-                // Samsung Gallery is not installed or cannot handle this image.
-            }
-
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, lastPhotoMimeType)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                })
-                return
-            } catch (_: Exception) {
-                // Continue to the Gallery app home screen fallback.
-            }
-        }
-
-        val samsungGalleryHome = packageManager.getLaunchIntentForPackage("com.sec.android.gallery3d")
-        if (samsungGalleryHome != null) {
-            try {
-                startActivity(samsungGalleryHome)
-                return
-            } catch (_: Exception) {
-                // Use Android's generic gallery category below.
+                // Fall back to Android's gallery category for other devices.
             }
         }
 
         try {
-            startActivity(
-                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_GALLERY)
-            )
+            val galleryIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_GALLERY)
+            startActivity(galleryIntent)
         } catch (_: Exception) {
             Toast.makeText(this, "No gallery app is available.", Toast.LENGTH_SHORT).show()
         }
@@ -1455,11 +1508,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private val onPressed: () -> Unit
     ) : View(context) {
 
-        private val fillPaint = android.graphics.Paint(
+        private val strokePaint = android.graphics.Paint(
             android.graphics.Paint.ANTI_ALIAS_FLAG
         ).apply {
             color = Color.WHITE
-            style = android.graphics.Paint.Style.FILL
+            strokeWidth = 1.65f
+            strokeCap = android.graphics.Paint.Cap.ROUND
+            strokeJoin = android.graphics.Paint.Join.ROUND
+            style = android.graphics.Paint.Style.STROKE
         }
 
         init {
@@ -1481,15 +1537,38 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         override fun onDraw(canvas: android.graphics.Canvas) {
             super.onDraw(canvas)
-            val size = dp(24).toFloat()
+            val size = dp(23).toFloat()
             canvas.save()
             canvas.translate((width - size) / 2f, (height - size) / 2f)
             canvas.scale(size / 24f, size / 24f)
-            fillPaint.color = Color.WHITE
+
+            val yellow = 0xFFFFD54F.toInt()
+            val highlighted = when (icon) {
+                "flash" -> flashMode == 1
+                "flashOff" -> flashMode == 2
+                "flashAuto" -> flashMode == 0
+                "flashOn" -> flashMode == 1
+                "timer" -> timerSeconds != 0
+                "timerOff" -> timerSeconds == 0
+                "timer2" -> timerSeconds == 2
+                "timer5" -> timerSeconds == 5
+                "timer10" -> timerSeconds == 10
+                else -> false
+            }
+            strokePaint.color = if (highlighted) yellow else Color.WHITE
+            strokePaint.strokeWidth = 1.55f
+
             when (icon) {
                 "settings" -> drawSettings(canvas)
-                "flash" -> drawFlash(canvas)
-                "timer" -> drawTimer(canvas)
+                "flash" -> drawFlash(canvas, flashMode)
+                "flashOff" -> drawFlashChoice(canvas, 2)
+                "flashAuto" -> drawFlashChoice(canvas, 0)
+                "flashOn" -> drawFlashChoice(canvas, 1)
+                "timer" -> drawTimer(canvas, timerSeconds)
+                "timerOff" -> drawTimer(canvas, 0)
+                "timer2" -> drawTimer(canvas, 2)
+                "timer5" -> drawTimer(canvas, 5)
+                "timer10" -> drawTimer(canvas, 10)
                 "ratio" -> drawRatio(canvas)
                 "motion" -> drawMotion(canvas)
                 "filters" -> drawFilters(canvas)
@@ -1499,156 +1578,136 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         private fun drawSettings(canvas: android.graphics.Canvas) {
-            val gear = android.graphics.Path().apply {
-                fillType = android.graphics.Path.FillType.EVEN_ODD
-                for (i in 0 until 32) {
-                    val angle = Math.toRadians(-90.0 + i * 11.25)
-                    val radius = if (i % 4 == 1 || i % 4 == 2) 10.7f else 8.6f
-                    val x = 12f + kotlin.math.cos(angle).toFloat() * radius
-                    val y = 12f + kotlin.math.sin(angle).toFloat() * radius
-                    if (i == 0) moveTo(x, y) else lineTo(x, y)
-                }
-                close()
-                addCircle(12f, 12f, 3.2f, android.graphics.Path.Direction.CW)
+            val path = android.graphics.Path()
+            for (i in 0 until 32) {
+                val angle = Math.toRadians(-90.0 + i * 11.25)
+                val radius = if (i % 4 == 1 || i % 4 == 2) 10.3f else 8.5f
+                val x = 12f + kotlin.math.cos(angle).toFloat() * radius
+                val y = 12f + kotlin.math.sin(angle).toFloat() * radius
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
-            canvas.drawPath(gear, fillPaint)
+            path.close()
+            canvas.drawPath(path, strokePaint)
+            canvas.drawCircle(12f, 12f, 3.6f, strokePaint)
         }
 
-        private fun drawFlash(canvas: android.graphics.Canvas) {
+        private fun drawBolt(canvas: android.graphics.Canvas, mode: Int) {
             val bolt = android.graphics.Path().apply {
-                moveTo(13.5f, 1.5f)
-                lineTo(5.2f, 13.2f)
-                lineTo(10.1f, 13.2f)
-                lineTo(9.1f, 22.5f)
-                lineTo(18.8f, 9.3f)
-                lineTo(13.6f, 9.3f)
+                moveTo(13.5f, 1.8f)
+                lineTo(5.6f, 13.2f)
+                lineTo(10.2f, 13.2f)
+                lineTo(9.5f, 22f)
+                lineTo(18.4f, 9.4f)
+                lineTo(13.6f, 9.4f)
                 close()
             }
-            canvas.drawPath(bolt, fillPaint)
-            if (flashMode == 2) {
-                val slash = android.graphics.Paint(fillPaint).apply {
-                    color = Color.BLACK
-                    strokeWidth = 2.3f
-                    strokeCap = android.graphics.Paint.Cap.ROUND
-                    style = android.graphics.Paint.Style.STROKE
+            canvas.drawPath(bolt, strokePaint)
+            if (mode == 2) {
+                canvas.drawLine(3.2f, 21f, 20.5f, 3f, strokePaint)
+            } else if (mode == 0) {
+                val a = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = strokePaint.color
+                    textSize = 8f
+                    typeface = android.graphics.Typeface.create(
+                        "sans-serif-medium",
+                        android.graphics.Typeface.NORMAL
+                    )
                 }
-                canvas.drawLine(4f, 20f, 20f, 4f, slash)
+                canvas.drawText("A", 15.2f, 21f, a)
             }
         }
 
-        private fun drawTimer(canvas: android.graphics.Canvas) {
-            val ring = android.graphics.Path().apply {
-                fillType = android.graphics.Path.FillType.EVEN_ODD
-                addCircle(12f, 13f, 10f, android.graphics.Path.Direction.CW)
-                addCircle(12f, 13f, 6.8f, android.graphics.Path.Direction.CCW)
-            }
-            canvas.drawPath(ring, fillPaint)
-            val hands = android.graphics.Path().apply {
-                moveTo(10.8f, 6.7f)
-                lineTo(13.2f, 6.7f)
-                lineTo(13.2f, 12.2f)
-                lineTo(17.1f, 14.4f)
-                lineTo(15.9f, 16.5f)
-                lineTo(10.8f, 13.7f)
-                close()
-            }
-            canvas.drawPath(hands, fillPaint)
-            if (timerSeconds > 0) {
-                canvas.drawCircle(19.4f, 19.2f, 3.4f, fillPaint)
+        private fun drawFlash(canvas: android.graphics.Canvas, mode: Int) {
+            drawBolt(canvas, mode)
+        }
+
+        private fun drawFlashChoice(canvas: android.graphics.Canvas, mode: Int) {
+            drawBolt(canvas, mode)
+        }
+
+        private fun drawTimer(canvas: android.graphics.Canvas, seconds: Int) {
+            canvas.drawCircle(11.5f, 12f, 9f, strokePaint)
+            canvas.drawLine(11.5f, 1.8f, 11.5f, 3.5f, strokePaint)
+            canvas.drawLine(9.4f, 1.8f, 13.6f, 1.8f, strokePaint)
+            canvas.drawLine(11.5f, 12f, 11.5f, 6.4f, strokePaint)
+            canvas.drawLine(11.5f, 12f, 15.5f, 14.1f, strokePaint)
+            if (seconds > 0) {
+                val numberPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = strokePaint.color
+                    textSize = if (seconds == 10) 6.5f else 8f
+                    typeface = android.graphics.Typeface.create(
+                        "sans-serif-medium",
+                        android.graphics.Typeface.NORMAL
+                    )
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    style = android.graphics.Paint.Style.FILL
+                }
+                canvas.drawText(
+                    seconds.toString(),
+                    if (seconds == 10) 18.2f else 17.7f,
+                    21.8f,
+                    numberPaint
+                )
             }
         }
 
         private fun drawRatio(canvas: android.graphics.Canvas) {
-            canvas.drawRoundRect(
-                android.graphics.RectF(2f, 4f, 22f, 20f),
-                4f, 4f, fillPaint
-            )
-            val textPaint = android.graphics.Paint(
-                android.graphics.Paint.ANTI_ALIAS_FLAG
-            ).apply {
-                color = Color.BLACK
-                style = android.graphics.Paint.Style.FILL
+            val p = strokePaint
+            canvas.drawLine(2.5f, 5f, 21.5f, 5f, p)
+            canvas.drawLine(2.5f, 19f, 21.5f, 19f, p)
+            canvas.drawLine(5f, 3f, 5f, 21f, p)
+            canvas.drawLine(19f, 3f, 19f, 21f, p)
+            val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = p.color
                 textAlign = android.graphics.Paint.Align.CENTER
-                textSize = when (aspectRatio) {
-                    "Full" -> 6.1f
-                    "9:16" -> 6.8f
-                    else -> 7.5f
-                }
-                typeface = android.graphics.Typeface.create(
-                    "sans-serif-medium",
-                    android.graphics.Typeface.NORMAL
-                )
+                textSize = if (aspectRatio == "Full") 6f else 7f
+                typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL)
+                style = android.graphics.Paint.Style.FILL
             }
-            val text = if (aspectRatio == "Full") "FULL" else aspectRatio
-            canvas.drawText(text, 12f, 14.7f, textPaint)
+            canvas.drawText(
+                if (aspectRatio == "Full") "FULL" else aspectRatio,
+                12f,
+                14.5f,
+                textPaint
+            )
         }
 
         private fun drawMotion(canvas: android.graphics.Canvas) {
-            canvas.drawRoundRect(
-                android.graphics.RectF(2f, 4f, 22f, 20f),
-                4f, 4f, fillPaint
-            )
-            val cutout = android.graphics.Paint(fillPaint).apply { color = Color.BLACK }
+            val p = strokePaint
+            canvas.drawRoundRect(android.graphics.RectF(2.5f, 4f, 21.5f, 20f), 2f, 2f, p)
             val play = android.graphics.Path().apply {
-                moveTo(10f, 7.7f)
-                lineTo(16.4f, 12f)
-                lineTo(10f, 16.3f)
+                moveTo(10f, 7.5f)
+                lineTo(16.5f, 12f)
+                lineTo(10f, 16.5f)
                 close()
             }
-            canvas.drawPath(play, cutout)
-            canvas.drawCircle(5.2f, 6.8f, 1.1f, cutout)
+            canvas.drawPath(play, p)
+            canvas.drawArc(android.graphics.RectF(4f, 5.5f, 19.5f, 20f), 205f, 260f, false, p)
         }
 
         private fun drawFilters(canvas: android.graphics.Canvas) {
-            val wand = android.graphics.Path().apply {
-                moveTo(4.2f, 18.2f)
-                lineTo(17.9f, 4.5f)
-                lineTo(20.2f, 6.8f)
-                lineTo(6.5f, 20.5f)
-                close()
-            }
-            canvas.drawPath(wand, fillPaint)
-            drawSparkle(canvas, 7f, 5.7f, 3.1f)
-            drawSparkle(canvas, 18.8f, 16.8f, 3.7f)
-            canvas.drawCircle(17.5f, 3.2f, 1.2f, fillPaint)
-        }
-
-        private fun drawSparkle(
-            canvas: android.graphics.Canvas,
-            centerX: Float,
-            centerY: Float,
-            radius: Float
-        ) {
-            val path = android.graphics.Path().apply {
-                moveTo(centerX, centerY - radius)
-                lineTo(centerX + radius * 0.28f, centerY - radius * 0.28f)
-                lineTo(centerX + radius, centerY)
-                lineTo(centerX + radius * 0.28f, centerY + radius * 0.28f)
-                lineTo(centerX, centerY + radius)
-                lineTo(centerX - radius * 0.28f, centerY + radius * 0.28f)
-                lineTo(centerX - radius, centerY)
-                lineTo(centerX - radius * 0.28f, centerY - radius * 0.28f)
-                close()
-            }
-            canvas.drawPath(path, fillPaint)
+            val p = strokePaint
+            canvas.drawLine(5f, 19f, 18.5f, 5.5f, p)
+            canvas.drawLine(14.5f, 2.5f, 14.5f, 8f, p)
+            canvas.drawLine(12f, 5.2f, 17f, 5.2f, p)
+            canvas.drawLine(5f, 2.5f, 5f, 7.5f, p)
+            canvas.drawLine(2.5f, 5f, 7.5f, 5f, p)
+            canvas.drawLine(19f, 15f, 19f, 20f, p)
+            canvas.drawLine(16.5f, 17.5f, 21.5f, 17.5f, p)
         }
 
         private fun drawGallery(canvas: android.graphics.Canvas) {
-            canvas.drawRoundRect(
-                android.graphics.RectF(2.5f, 3.5f, 21.5f, 20.5f),
-                3f, 3f, fillPaint
-            )
-            val dark = android.graphics.Paint(fillPaint).apply { color = 0xFF303030.toInt() }
-            canvas.drawCircle(8f, 9f, 1.8f, dark)
+            val p = strokePaint
+            canvas.drawRoundRect(android.graphics.RectF(2.5f, 4f, 21.5f, 20f), 2f, 2f, p)
+            canvas.drawCircle(8f, 9f, 1.8f, p)
             val mountain = android.graphics.Path().apply {
-                moveTo(4f, 18f)
-                lineTo(9.2f, 11.5f)
-                lineTo(12.3f, 15.1f)
-                lineTo(15.4f, 11.6f)
-                lineTo(20f, 18f)
-                close()
+                moveTo(4f, 17.8f)
+                lineTo(9.3f, 11.5f)
+                lineTo(12.6f, 15f)
+                lineTo(15.5f, 11f)
+                lineTo(20f, 17.8f)
             }
-            canvas.drawPath(mountain, dark)
+            canvas.drawPath(mountain, p)
         }
     }
 
