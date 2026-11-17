@@ -40,6 +40,7 @@ import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.animation.OvershootInterpolator
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.GridLayout
@@ -367,11 +368,79 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             LinearLayout.LayoutParams.MATCH_PARENT, dp(56)
         ))
 
-        modeScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-            clipToPadding = false
-            isFillViewport = false
+        modeScroll = object : HorizontalScrollView(this) {
+            private var gestureStartX = 0f
+            private var watchEdgeDuringFling = false
+            private var edgeBouncePlayed = false
+
+            init {
+                isHorizontalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                clipToPadding = false
+                isFillViewport = false
+            }
+
+            override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    gestureStartX = event.x
+                    edgeBouncePlayed = false
+                    watchEdgeDuringFling = true
+                }
+                return super.onInterceptTouchEvent(event)
+            }
+
+            override fun onTouchEvent(event: MotionEvent): Boolean {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    gestureStartX = event.x
+                    edgeBouncePlayed = false
+                    watchEdgeDuringFling = true
+                }
+                val result = super.onTouchEvent(event)
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL
+                ) {
+                    val fingerDelta = event.x - gestureStartX
+                    val maxScroll = (getChildAt(0)?.width ?: 0) - width
+                    if (!edgeBouncePlayed && maxScroll > 0) {
+                        if (scrollX <= dp(2) && fingerDelta > dp(12)) {
+                            playEdgeBounce(1)
+                        } else if (scrollX >= maxScroll - dp(2) && fingerDelta < -dp(12)) {
+                            playEdgeBounce(-1)
+                        }
+                    }
+                    postDelayed({ watchEdgeDuringFling = false }, 650)
+                }
+                return result
+            }
+
+            override fun onScrollChanged(
+                left: Int,
+                top: Int,
+                oldLeft: Int,
+                oldTop: Int
+            ) {
+                super.onScrollChanged(left, top, oldLeft, oldTop)
+                if (!watchEdgeDuringFling || edgeBouncePlayed) return
+                val maxScroll = (getChildAt(0)?.width ?: 0) - width
+                if (maxScroll <= 0) return
+                if (left <= 0 && oldLeft > left) {
+                    playEdgeBounce(1)
+                } else if (left >= maxScroll && oldLeft < left) {
+                    playEdgeBounce(-1)
+                }
+            }
+
+            private fun playEdgeBounce(direction: Int) {
+                if (edgeBouncePlayed) return
+                edgeBouncePlayed = true
+                modeRow.animate().cancel()
+                modeRow.translationX = direction * dp(6).toFloat()
+                modeRow.animate()
+                    .translationX(0f)
+                    .setDuration(310L)
+                    .setInterpolator(OvershootInterpolator(1.15f))
+                    .start()
+            }
         }
         modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1129,7 +1198,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val overlay = FrameLayout(this).apply {
             // 70% transparent black over the same live camera screen.
             setBackgroundColor(0x4D000000)
-            setOnClickListener { closeMoreModes() }
+            if (!modeEditing) {
+                setOnClickListener { closeMoreModes() }
+            }
         }
 
         if (modeEditing) {
@@ -1160,6 +1231,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             setOnClickListener { }
         }
         addModeGridRows(grid, moreModes, editing = modeEditing, group = "more")
+        if (modeEditing) setModeDropTarget(overlay, "more", null)
         if (moreModes.isEmpty()) {
             grid.addView(TextView(this).apply {
                 text = if (modeEditing) "Drag modes here" else "No additional modes."
@@ -1485,6 +1557,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
             }
+            if (editing) setModeDropTarget(row, group, null)
             rowModes.forEach { mode ->
                 row.addView(
                     createModeTile(mode, editing, group),
@@ -3079,91 +3152,60 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             when (mode) {
                 "Night" -> {
-                    // Fine crescent with a small star.
                     val moon = android.graphics.Path().apply {
-                        moveTo(16.5f, 2.8f)
-                        cubicTo(9.3f, 3.2f, 5.2f, 8.1f, 6.2f, 13.5f)
-                        cubicTo(7.3f, 19.8f, 14.4f, 22.4f, 19.8f, 18.1f)
-                        cubicTo(13.7f, 18.7f, 9.8f, 14.1f, 10.2f, 9.5f)
-                        cubicTo(10.4f, 6.6f, 12.7f, 4.2f, 16.5f, 2.8f)
+                        moveTo(16.5f, 3f)
+                        cubicTo(8.5f, 4f, 5.5f, 10f, 7.5f, 16f)
+                        cubicTo(10f, 22f, 17f, 22f, 21f, 16f)
+                        cubicTo(14f, 19f, 9f, 13f, 11f, 8f)
+                        cubicTo(12f, 5.5f, 14f, 4f, 16.5f, 3f)
                     }
                     canvas.drawPath(moon, p)
-                    canvas.drawCircle(20.4f, 5.1f, 0.8f, p)
                 }
                 "Single Take" -> {
-                    canvas.drawCircle(12f, 12f, 9f, p)
-                    canvas.drawCircle(12f, 12f, 4.3f, p)
-                    canvas.drawCircle(12f, 12f, 1.2f, p)
+                    canvas.drawCircle(12f, 12f, 8.8f, p)
+                    canvas.drawCircle(12f, 12f, 3.2f, p)
+                    canvas.drawCircle(12f, 12f, 0.8f, p)
                 }
                 "Food" -> {
-                    // Samsung's plate with fork and spoon contained inside the ring.
-                    canvas.drawCircle(12f, 12f, 8.9f, p)
-                    canvas.drawLine(8.4f, 7f, 8.4f, 17f, p)
-                    canvas.drawLine(6.7f, 7f, 6.7f, 10.2f, p)
-                    canvas.drawLine(10.1f, 7f, 10.1f, 10.2f, p)
-                    canvas.drawLine(6.7f, 10.2f, 10.1f, 10.2f, p)
-                    canvas.drawArc(android.graphics.RectF(13.1f, 6.5f, 17.6f, 11.8f), 180f, 180f, false, p)
-                    canvas.drawLine(15.35f, 11.8f, 15.35f, 17.2f, p)
+                    canvas.drawCircle(12f, 12f, 8.8f, p)
+                    canvas.drawLine(9f, 7f, 9f, 17f, p)
+                    canvas.drawLine(7f, 7f, 7f, 10f, p)
+                    canvas.drawLine(11f, 7f, 11f, 10f, p)
+                    canvas.drawLine(7f, 10f, 11f, 10f, p)
+                    canvas.drawLine(16f, 7f, 16f, 17f, p)
+                    canvas.drawArc(android.graphics.RectF(14f, 6.5f, 18f, 11f), 180f, 180f, false, p)
                 }
                 "Panorama" -> {
-                    // Open panoramic frame with bowed upper and lower edges.
-                    val panorama = android.graphics.Path().apply {
-                        moveTo(2.8f, 6.2f)
-                        quadTo(12f, 1.8f, 21.2f, 6.2f)
-                        lineTo(21.2f, 17.8f)
-                        quadTo(12f, 22.2f, 2.8f, 17.8f)
+                    val shape = android.graphics.Path().apply {
+                        moveTo(3f, 8f)
+                        quadTo(12f, 2f, 21f, 8f)
+                        lineTo(21f, 16f)
+                        quadTo(12f, 22f, 3f, 16f)
                         close()
                     }
-                    canvas.drawPath(panorama, p)
-                    canvas.drawLine(7f, 5.2f, 7f, 18.8f, p)
-                    canvas.drawLine(17f, 5.2f, 17f, 18.8f, p)
-                    canvas.drawLine(7f, 12f, 17f, 12f, p)
+                    canvas.drawPath(shape, p)
                 }
                 "Super Slow-Mo" -> {
-                    canvas.drawCircle(12f, 12f, 8.8f, p)
-                    canvas.drawOval(android.graphics.RectF(7f, 9.3f, 17.5f, 14.7f), p)
-                    canvas.drawCircle(14.5f, 12f, 1.3f, p)
+                    canvas.drawOval(android.graphics.RectF(3f, 5f, 21f, 19f), p)
+                    canvas.drawCircle(16f, 12f, 2f, p)
                 }
                 "Slow-Mo" -> {
                     canvas.drawCircle(12f, 12f, 8.8f, p)
-                    canvas.drawCircle(12f, 12f, 3.2f, p)
-                    canvas.drawCircle(12f, 12f, 1f, p)
+                    canvas.drawCircle(12f, 12f, 2.2f, p)
                 }
                 "Hyperlapse" -> {
-                    // A speed-lapse disc with three short horizontal motion lines.
-                    canvas.drawOval(android.graphics.RectF(2.5f, 4.2f, 21.5f, 19.8f), p)
-                    canvas.drawLine(6f, 9f, 17.5f, 9f, p)
-                    canvas.drawLine(5f, 12f, 15.5f, 12f, p)
-                    canvas.drawLine(6f, 15f, 17.5f, 15f, p)
+                    canvas.drawOval(android.graphics.RectF(2.5f, 4.5f, 21.5f, 19.5f), p)
+                    canvas.drawLine(6f, 12f, 16f, 12f, p)
                     canvas.drawCircle(18f, 12f, 1.2f, p)
                 }
                 "Portrait Video" -> {
-                    // Person silhouette and compact video-camera mark.
-                    canvas.drawCircle(9.1f, 7.5f, 3.2f, p)
-                    canvas.drawArc(android.graphics.RectF(2.8f, 11f, 15.4f, 23.7f), 195f, 150f, false, p)
-                    canvas.drawArc(android.graphics.RectF(13.1f, 10f, 22.6f, 19.4f), 300f, 300f, false, p)
-                    canvas.drawCircle(17.8f, 14.7f, 1.2f, p)
-                    canvas.drawLine(19.3f, 17.7f, 22f, 20.2f, p)
+                    canvas.drawCircle(10f, 7.5f, 3f, p)
+                    canvas.drawArc(android.graphics.RectF(3f, 11f, 17f, 24f), 195f, 150f, false, p)
+                    canvas.drawCircle(19f, 15f, 3.2f, p)
                 }
                 "Portrait" -> {
-                    canvas.drawCircle(12f, 7.5f, 3.2f, p)
-                    canvas.drawArc(android.graphics.RectF(4f, 11f, 20f, 25f), 195f, 150f, false, p)
-                }
-                "Pro Video" -> {
-                    canvas.drawCircle(12f, 12f, 9f, p)
-                    val play = android.graphics.Path().apply {
-                        moveTo(9.8f, 7.5f)
-                        lineTo(16.5f, 12f)
-                        lineTo(9.8f, 16.5f)
-                        close()
-                    }
-                    canvas.drawPath(play, p)
-                }
-                "Pro" -> {
-                    canvas.drawCircle(12f, 12f, 9f, p)
-                    canvas.drawLine(7f, 15.5f, 10f, 11.8f, p)
-                    canvas.drawLine(10f, 11.8f, 13f, 14f, p)
-                    canvas.drawLine(13f, 14f, 17.5f, 8.5f, p)
+                    canvas.drawCircle(12f, 7.5f, 3f, p)
+                    canvas.drawArc(android.graphics.RectF(4f, 11f, 20f, 24f), 195f, 150f, false, p)
                 }
                 "Photo" -> {
                     canvas.drawRoundRect(android.graphics.RectF(3f, 6f, 21f, 19f), 2f, 2f, p)
@@ -3187,7 +3229,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        private fun drawGallery(canvas: android.graphics.Canvas) {
+        private fun drawGallery(canvas: android.graphics.Canvas) {        private fun drawGallery(canvas: android.graphics.Canvas) {
             val p = strokePaint
             canvas.drawRoundRect(android.graphics.RectF(2.5f, 4f, 21.5f, 20f), 2f, 2f, p)
             canvas.drawCircle(8f, 9f, 1.8f, p)
