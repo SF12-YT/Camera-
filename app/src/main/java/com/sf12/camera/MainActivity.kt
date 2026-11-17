@@ -43,7 +43,6 @@ import android.view.View
 import android.view.animation.OvershootInterpolator
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.GridLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -117,7 +116,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var moreModesOverlay: FrameLayout? = null
     private var modeEditing = false
     private var settingsOverlay: FrameLayout? = null
-    private var cameraRollOverlay: FrameLayout? = null
     private data class ModeDragPayload(val mode: String, val sourceGroup: String)
     private data class CameraStorageLocation(
         val volumeName: String,
@@ -126,17 +124,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val isAvailable: Boolean = true,
         val status: String = ""
     )
-    private data class CameraRollPhoto(
-        val uri: Uri,
-        val displayName: String,
-        val dateTaken: Long
-    )
     private val knownCameraModes = listOf(
         "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
         "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
     )
-    private var lastPhotoUri: Uri? = null
-    private var lastPhotoMimeType: String = "image/jpeg"
     private var openingCamera = false
     private var capturePending = false
 
@@ -210,10 +201,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     @Deprecated("Deprecated in Android API; retained for back compatibility.")
     override fun onBackPressed() {
-        if (cameraRollOverlay != null) {
-            closeCameraRoll()
-            return
-        }
         if (settingsOverlay != null) {
             closeSettings()
             return
@@ -472,7 +459,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isClickable = true
             isFocusable = true
             contentDescription = "Open gallery"
-            setOnClickListener { openLastPhoto() }
+            setOnClickListener { openStockCameraAlbum() }
         }
         galleryThumbnail = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
@@ -1997,13 +1984,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             val latestUri = findLatestCameraPhotoUri()
             mainHandler.post {
                 if (!isFinishing && ::galleryThumbnail.isInitialized) {
-                    lastPhotoUri = latestUri
                     if (latestUri != null) {
-                        try {
-                            lastPhotoMimeType = contentResolver.getType(latestUri) ?: "image/jpeg"
-                        } catch (_: Exception) {
-                            lastPhotoMimeType = "image/jpeg"
-                        }
                         showGalleryThumbnail(latestUri)
                     } else {
                         galleryThumbnail.setImageDrawable(textDrawablePlaceholder())
@@ -2062,333 +2043,132 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun queryCameraRoll(): List<CameraRollPhoto> {
-        // VOLUME_EXTERNAL is MediaStore's combined view of all shared external
-        // storage volumes. It includes both primary/internal storage and an
-        // indexed removable SD card, regardless of the selected save location.
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.DATE_TAKEN,
-            MediaStore.MediaColumns.VOLUME_NAME
-        )
-        val selection: String
-        val selectionArgs: Array<String>
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            selection = "(${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
-                "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
-            selectionArgs = arrayOf(
-                Environment.DIRECTORY_DCIM + "/Camera",
-                Environment.DIRECTORY_DCIM + "/Camera/%"
-            )
-        } else {
-            selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
-            selectionArgs = arrayOf("Camera")
-        }
-
-        val photos = mutableListOf<CameraRollPhoto>()
-        contentResolver.query(
-            collection,
-            projection,
-            selection,
-            selectionArgs,
-            "${MediaStore.Images.Media.DATE_TAKEN} DESC, " +
-                "${MediaStore.Images.Media.DATE_ADDED} DESC, " +
-                "${MediaStore.Images.Media._ID} DESC"
-        )?.use { cursor ->
-            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-            val takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
-            val volumeColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.VOLUME_NAME)
+    /**
+     * Builds a Samsung Gallery album URI for the DCIM/Camera bucket.
+     *
+     * Samsung Gallery accepts the Android Gallery3D bucketId directory URI.
+     * This opens the Camera album grid rather than a single photo or the
+     * Gallery landing page.
+     */
+    private fun findCameraAlbumUri(): Uri? {
+        return try {
+            val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                selectedCameraStorageLocation()?.volumeName
+                    ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
             } else {
-                -1
+                "external"
             }
-            while (cursor.moveToNext()) {
-                val id = cursor.getLong(idColumn)
-                val name = if (cursor.isNull(nameColumn)) "Camera photo" else cursor.getString(nameColumn)
-                val taken = if (cursor.isNull(takenColumn)) 0L else cursor.getLong(takenColumn)
-                val photoCollection = if (volumeColumn >= 0 && !cursor.isNull(volumeColumn)) {
-                    MediaStore.Images.Media.getContentUri(cursor.getString(volumeColumn))
-                } else {
-                    collection
-                }
-                photos.add(
-                    CameraRollPhoto(
-                        ContentUris.withAppendedId(photoCollection, id),
-                        name,
-                        taken
-                    )
+            val filesUri = MediaStore.Files.getContentUri(volumeName)
+            val projection = arrayOf(MediaStore.MediaColumns.BUCKET_ID)
+            val cameraPath = Environment.DIRECTORY_DCIM + "/Camera/"
+            val selection: String
+            val selectionArgs: Array<String>
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                selection = "(${MediaStore.MediaColumns.RELATIVE_PATH} = ? OR " +
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ?) AND " +
+                    "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
+                selectionArgs = arrayOf(
+                    cameraPath,
+                    Environment.DIRECTORY_DCIM + "/Camera",
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
+                )
+            } else {
+                selection = "${MediaStore.MediaColumns.DATA} LIKE ? AND " +
+                    "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
+                selectionArgs = arrayOf(
+                    "%/DCIM/Camera/%",
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
                 )
             }
+
+            val bucketId = contentResolver.query(
+                filesUri,
+                projection,
+                selection,
+                selectionArgs,
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC, " +
+                    "${MediaStore.MediaColumns._ID} DESC"
+            )?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                    cursor.getString(0)
+                } else {
+                    null
+                }
+            } ?: return null
+
+            // Gallery3D reads the bucketId parameter and mediaTypes extra
+            // to build the album, including both photos and videos.
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI.buildUpon()
+                .appendQueryParameter("bucketId", bucketId)
+                .build()
+        } catch (_: Exception) {
+            null
         }
-        return photos
     }
 
-    private fun closeCameraRoll() {
-        cameraRollOverlay?.let { root.removeView(it) }
-        cameraRollOverlay = null
-    }
-
-    private fun openLastPhoto() {
+    private fun openStockCameraAlbum() {
         if (!hasGalleryReadPermission()) {
             requestGalleryReadPermission()
-            Toast.makeText(this, "Allow photo access to open the Camera roll.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Allow photo access to open the Camera album.",
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
-        closeCameraRoll()
-        val overlay = FrameLayout(this).apply {
-            setBackgroundColor(0xFF080808.toInt())
-            isClickable = true
-        }
-        cameraRollOverlay = overlay
-        root.addView(
-            overlay,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-        val loading = TextView(this).apply {
-            text = "Loading Camera roll…"
-            textSize = 15f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-        }
-        overlay.addView(
-            loading,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
 
-        Thread {
-            var queryError: Exception? = null
-            val photos = try {
-                queryCameraRoll()
-            } catch (error: Exception) {
-                queryError = error
-                emptyList()
-            }
-            mainHandler.post {
-                if (isFinishing || cameraRollOverlay !== overlay) return@post
-                overlay.removeAllViews()
-                val screen = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setBackgroundColor(0xFF080808.toInt())
-                }
-                val header = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(18), dp(10), dp(12), dp(8))
-                }
-                val titleColumn = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-                titleColumn.addView(TextView(this).apply {
-                    text = "Camera"
-                    textSize = 20f
-                    setTextColor(Color.WHITE)
-                    typeface = android.graphics.Typeface.create(
-                        "sans-serif-medium",
-                        android.graphics.Typeface.NORMAL
-                    )
-                })
-                titleColumn.addView(TextView(this).apply {
-                    text = "${photos.size} photos · All storage · Newest first"
-                    textSize = 11f
-                    setTextColor(0xFFBDBDBD.toInt())
-                })
-                header.addView(titleColumn, LinearLayout.LayoutParams(0, dp(54), 1f))
-                val closeButton = TextView(this).apply {
-                    text = "×"
-                    textSize = 30f
-                    gravity = Gravity.CENTER
-                    setTextColor(Color.WHITE)
-                    isClickable = true
-                    setOnClickListener { closeCameraRoll() }
-                }
-                header.addView(closeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
-                screen.addView(header)
-
-                if (queryError != null || photos.isEmpty()) {
-                    screen.addView(TextView(this).apply {
-                        text = if (queryError != null) {
-                            "Couldn't load Camera roll. Check photo access and try again."
-                        } else {
-                            "No photos found in DCIM/Camera on available storage."
-                        }
-                        textSize = 14f
-                        gravity = Gravity.CENTER
-                        setTextColor(0xFFCCCCCC.toInt())
-                    }, LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-                    ))
-                } else {
-                    val scroll = android.widget.ScrollView(this).apply {
-                        isFillViewport = true
-                        overScrollMode = View.OVER_SCROLL_NEVER
-                    }
-                    val grid = GridLayout(this).apply {
-                        columnCount = 3
-                        alignmentMode = GridLayout.ALIGN_BOUNDS
-                        useDefaultMargins = false
-                    }
-                    val cellSize = (resources.displayMetrics.widthPixels / 3).coerceAtLeast(dp(96))
-                    val imageViews = mutableListOf<ImageView>()
-                    photos.forEachIndexed { index, photo ->
-                        val image = ImageView(this).apply {
-                            scaleType = ImageView.ScaleType.CENTER_CROP
-                            setBackgroundColor(0xFF202020.toInt())
-                            contentDescription = photo.displayName
-                            isClickable = true
-                            isFocusable = true
-                            setOnClickListener { openCameraRollPhoto(photo.uri) }
-                        }
-                        val params = GridLayout.LayoutParams(
-                            GridLayout.spec(index / 3),
-                            GridLayout.spec(index % 3)
-                        ).apply {
-                            width = cellSize
-                            height = cellSize
-                            setMargins(dp(1), dp(1), dp(1), dp(1))
-                        }
-                        grid.addView(image, params)
-                        imageViews.add(image)
-                    }
-                    scroll.addView(
-                        grid,
-                        android.view.ViewGroup.LayoutParams(
-                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-                        )
-                    )
-                    screen.addView(
-                        scroll,
-                        LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-                        )
-                    )
-
-                    // Keep every photo in the album, but decode thumbnails only near
-                    // the visible scroll position to avoid loading the whole camera roll.
-                    val requestedThumbnails = mutableSetOf<Int>()
-                    val thumbnailRetryCounts = mutableMapOf<Int, Int>()
-                    var scheduleThumbnailRetry: ((Int) -> Unit)? = null
-
-                    fun loadThumbnailRange(firstIndex: Int, lastIndex: Int) {
-                        if (photos.isEmpty()) return
-                        val from = firstIndex.coerceAtLeast(0)
-                        val to = lastIndex.coerceAtMost(photos.lastIndex)
-                        if (from > to) return
-                        val indexes = synchronized(requestedThumbnails) {
-                            (from..to).filter { requestedThumbnails.add(it) }
-                        }
-                        if (indexes.isEmpty()) return
-
-                        Thread {
-                            indexes.forEach { index ->
-                                val photo = photos[index]
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                    try {
-                                        val bitmap = contentResolver.loadThumbnail(
-                                            photo.uri,
-                                            Size(dp(120), dp(120)),
-                                            null
-                                        )
-                                        mainHandler.post {
-                                            if (cameraRollOverlay === overlay && index < imageViews.size) {
-                                                imageViews[index].setImageBitmap(bitmap)
-                                            }
-                                        }
-                                    } catch (_: Exception) {
-                                        scheduleThumbnailRetry?.invoke(index)
-                                    }
-                                } else {
-                                    // Keep the legacy path working on Android 8/9,
-                                    // where ContentResolver.loadThumbnail is unavailable.
-                                    mainHandler.post {
-                                        if (cameraRollOverlay === overlay && index < imageViews.size) {
-                                            try {
-                                                imageViews[index].setImageURI(photo.uri)
-                                            } catch (_: Exception) {
-                                                scheduleThumbnailRetry?.invoke(index)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }.start()
-                    }
-
-                    scheduleThumbnailRetry = { index ->
-                        val retry = synchronized(requestedThumbnails) {
-                            val attempts = (thumbnailRetryCounts[index] ?: 0) + 1
-                            thumbnailRetryCounts[index] = attempts
-                            if (attempts <= 2) requestedThumbnails.remove(index)
-                            attempts
-                        }
-                        if (retry <= 2) {
-                            mainHandler.postDelayed({
-                                if (cameraRollOverlay === overlay) {
-                                    loadThumbnailRange(index, index)
-                                }
-                            }, 500L * retry)
-                        }
-                    }
-
-                    scroll.setOnScrollChangeListener { _, _, scrollY, _, _ ->
-                        val firstVisibleRow = (scrollY / cellSize).coerceAtLeast(0)
-                        val lastVisibleRow = ((scrollY + scroll.height) / cellSize) + 3
-                        loadThumbnailRange(firstVisibleRow * 3, (lastVisibleRow + 1) * 3 - 1)
-                    }
-                    scroll.post {
-                        val initialRows = (scroll.height / cellSize) + 4
-                        loadThumbnailRange(0, initialRows * 3 - 1)
-                    }
-                }
-
-                overlay.addView(
-                    screen,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-                )
-            }
-        }.start()
-    }
-
-    private fun openCameraRollPhoto(uri: Uri) {
-        val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
-            setComponent(
-                ComponentName(
-                    "com.sec.android.gallery3d",
-                    "com.sec.android.gallery3d.app.GalleryActivity"
-                )
-            )
-            setDataAndType(uri, "image/*")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+        val galleryPackage = "com.sec.android.gallery3d"
+        val albumUri = findCameraAlbumUri()
         try {
-            startActivity(samsungIntent)
-        } catch (_: Exception) {
-            try {
+            if (albumUri != null) {
                 startActivity(
-                    Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, "image/*")
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    Intent(Intent.ACTION_VIEW, albumUri).apply {
+                        component = ComponentName(
+                            galleryPackage,
+                            "com.sec.android.gallery3d.app.GalleryActivity"
+                        )
+                        putExtra("windowTitle", "Camera")
+                        // Gallery3D uses bit flags: images (1) + videos (2).
+                        putExtra("mediaTypes", 3)
+                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     }
                 )
+            } else {
+                val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
+                if (launchIntent != null) {
+                    startActivity(launchIntent)
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Samsung Gallery isn't available on this device.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        } catch (_: Exception) {
+            // If the album-specific activity is unavailable, fall back to
+            // the installed Samsung Gallery app rather than rendering our
+            // own imitation gallery or opening a random single photo.
+            try {
+                val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
+                if (launchIntent != null) {
+                    startActivity(launchIntent)
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Couldn't open Samsung Gallery.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             } catch (_: Exception) {
-                Toast.makeText(this, "Couldn't open this photo.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this,
+                    "Couldn't open Samsung Gallery.",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
