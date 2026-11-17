@@ -869,7 +869,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 storagePreferences.edit()
                     .putString("camera_storage_volume", location.volumeName)
                     .apply()
-                lastPhotoUri = null
                 loadLatestCameraThumbnail()
                 storageSummary.text = "Photos are saved to " + storageOptions[position] + "/DCIM/Camera."
             }
@@ -2471,8 +2470,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     null
                 )
             }
-            lastPhotoUri = uri
-            lastPhotoMimeType = "image/jpeg"
             runOnUiThread {
                 showGalleryThumbnail(uri)
                 Toast.makeText(
