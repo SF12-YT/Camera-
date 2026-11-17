@@ -1107,7 +1107,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 overScrollMode = View.OVER_SCROLL_NEVER
                 addView(
                     grid,
-                    android.widget.ScrollView.LayoutParams(
+                    FrameLayout.LayoutParams(
                         android.widget.ScrollView.LayoutParams.MATCH_PARENT,
                         android.widget.ScrollView.LayoutParams.WRAP_CONTENT
                     )
@@ -1262,7 +1262,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val payload = ModeDragPayload(mode, "main")
                 val clip = ClipData.newPlainText("camera-mode", mode)
                 @Suppress("DEPRECATION")
-                chip.startDrag(clip, View.DragShadowBuilder(chip), payload, 0)
+                it.startDrag(clip, View.DragShadowBuilder(it), payload, 0)
             }
         }
         setModeDropTarget(chip, "main", mode)
