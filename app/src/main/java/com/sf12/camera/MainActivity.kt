@@ -1049,7 +1049,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         activeMode = mode
         updatePrimaryModeLabels()
         if (mode == "Pro") {
-            selectTab("Pro")
+            Toast.makeText(this, "Pro mode is not implemented yet.", Toast.LENGTH_SHORT).show()
             return
         }
         if (mode != "Photo") {
@@ -1186,7 +1186,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         activePrimaryMode = mode
                         activeMode = mode
                         updatePrimaryModeLabels()
-                        if (mode == "Pro") selectTab("Pro")
                     }
                     setOnDragListener { target, event ->
                         when (event.action) {
@@ -3136,7 +3135,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        private fun drawGallery(canvas: android.graphics.Canvas) {        private fun drawGallery(canvas: android.graphics.Canvas) {
+        private fun drawGallery(canvas: android.graphics.Canvas) {
             val p = strokePaint
             canvas.drawRoundRect(android.graphics.RectF(2.5f, 4f, 21.5f, 20f), 2f, 2f, p)
             canvas.drawCircle(8f, 9f, 1.8f, p)
