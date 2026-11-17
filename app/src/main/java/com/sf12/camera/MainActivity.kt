@@ -1108,8 +1108,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 addView(
                     grid,
                     FrameLayout.LayoutParams(
-                        android.widget.ScrollView.LayoutParams.MATCH_PARENT,
-                        android.widget.ScrollView.LayoutParams.WRAP_CONTENT
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT
                     )
                 )
             }
