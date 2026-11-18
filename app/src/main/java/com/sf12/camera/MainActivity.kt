@@ -2142,13 +2142,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Do not pin GalleryActivity/GalleryOpaqueActivity: Samsung firmware
         // versions route these intents differently.
         val galleryIntent = Intent(Intent.ACTION_VIEW, albumUri).apply {
-            // Explicitly mark this as an album directory, not a single image item.
-            setDataAndType(albumUri, "vnd.android.cursor.dir/image")
+            // Use the standard MediaStore bucket URI without forcing a MIME type
+            // or Gallery3D-specific mediaTypes flags. Samsung Gallery handles
+            // the bucket URI itself and decides how to display the album.
             setPackage(galleryPackage)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra("windowTitle", "Camera")
-            // Gallery3D flags: INCLUDE_IMAGES (1) | INCLUDE_VIDEOS (4).
-            putExtra("mediaTypes", 5)
         }
 
         try {
