@@ -114,6 +114,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         "Hyperlapse", "Portrait Video"
     )
     private var moreModesOverlay: FrameLayout? = null
+    private var moreModesTaskbarTouchProxy: View? = null
     private var modeEditing = false
     private var settingsOverlay: FrameLayout? = null
     private data class ModeDragPayload(val mode: String, val sourceGroup: String)
@@ -1134,12 +1135,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             labels[mode] = label
         }
         modeLabels = labels
+        updateModeScrollEdgePadding()
+        updatePrimaryModeLabels()
+    }
+
+    private fun updateModeScrollEdgePadding() {
+        if (!::modeScroll.isInitialized || !::modeLabels.isInitialized) return
         modeScroll.post {
-            val edgeSpace = modeScroll.width / 2
-            modeRow.setPadding(edgeSpace, 0, edgeSpace, 0)
+            val first = primaryModes.firstOrNull()?.let { modeLabels[it] }
+            val last = primaryModes.lastOrNull()?.let { modeLabels[it] }
+            if (first == null || last == null || modeScroll.width <= 0) return@post
+
+            // At either end, centre the first/last mode name in the viewport.
+            val leftInset = ((modeScroll.width - first.width) / 2).coerceAtLeast(0)
+            val rightInset = ((modeScroll.width - last.width) / 2).coerceAtLeast(0)
+            modeRow.setPadding(leftInset, 0, rightInset, 0)
             centerSelectedMode()
         }
-        updatePrimaryModeLabels()
     }
 
     private fun selectMode(mode: String) {
@@ -1190,47 +1202,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun showMoreModes() {
         closeMoreModes(resetEditing = false)
-        val overlay = object : FrameLayout(this) {
-            private var forwardingModeStripGesture = false
-
-            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    val location = IntArray(2)
-                    modeScroll.getLocationOnScreen(location)
-                    val x = event.rawX
-                    val y = event.rawY
-                    forwardingModeStripGesture =
-                        x >= location[0] && x < location[0] + modeScroll.width &&
-                        y >= location[1] && y < location[1] + modeScroll.height
-                }
-
-                if (forwardingModeStripGesture) {
-                    // A child overlay cannot fall through to a sibling beneath it.
-                    // Relay the complete gesture directly to the real HorizontalScrollView.
-                    val location = IntArray(2)
-                    modeScroll.getLocationOnScreen(location)
-                    val forwarded = MotionEvent.obtain(event)
-                    forwarded.setLocation(
-                        event.rawX - location[0],
-                        event.rawY - location[1]
-                    )
-                    try {
-                        modeScroll.dispatchTouchEvent(forwarded)
-                    } finally {
-                        forwarded.recycle()
-                    }
-
-                    if (event.actionMasked == MotionEvent.ACTION_UP ||
-                        event.actionMasked == MotionEvent.ACTION_CANCEL
-                    ) {
-                        forwardingModeStripGesture = false
-                    }
-                    // Keep ownership of this gesture until its final event.
-                    return true
-                }
-                return super.dispatchTouchEvent(event)
-            }
-        }.apply {
+        val overlay = FrameLayout(this).apply {
             // Keep the MORE panel dimming the live preview, while the real mode strip
             // underneath remains touchable and horizontally scrollable.
             setBackgroundColor(0x4D000000)
@@ -1349,7 +1321,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
         moreModesOverlay = overlay
-        if (modeEditing) addBottomModeDropTargets(overlay)
+        if (modeEditing) {
+            addBottomModeDropTargets(overlay)
+        } else {
+            installMoreModesTaskbarTouchProxy(overlay)
+        }
     }
 
     /**
@@ -1643,7 +1619,55 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         showMoreModes()
     }
 
+    private fun installMoreModesTaskbarTouchProxy(overlay: FrameLayout) {
+        // Place a transparent sibling above the MORE overlay exactly over the real
+        // taskbar. It forwards taps and complete drag/fling gestures to modeScroll.
+        overlay.post {
+            if (moreModesOverlay !== overlay || modeEditing ||
+                !::modeScroll.isInitialized || modeScroll.width <= 0
+            ) return@post
+
+            moreModesTaskbarTouchProxy?.let { root.removeView(it) }
+            val rootLocation = IntArray(2)
+            val stripLocation = IntArray(2)
+            root.getLocationOnScreen(rootLocation)
+            modeScroll.getLocationOnScreen(stripLocation)
+
+            val proxy = object : View(this@MainActivity) {
+                override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                    val forwarded = MotionEvent.obtain(event)
+                    forwarded.offsetLocation(
+                        (stripLocation[0] - (rootLocation[0] +
+                            (left))).toFloat(),
+                        (stripLocation[1] - (rootLocation[1] +
+                            (top))).toFloat()
+                    )
+                    try {
+                        modeScroll.dispatchTouchEvent(forwarded)
+                    } finally {
+                        forwarded.recycle()
+                    }
+                    return true
+                }
+            }.apply {
+                isClickable = true
+                isFocusable = false
+                setBackgroundColor(Color.TRANSPARENT)
+                contentDescription = "Camera mode taskbar"
+            }
+
+            val params = FrameLayout.LayoutParams(modeScroll.width, modeScroll.height).apply {
+                leftMargin = stripLocation[0] - rootLocation[0]
+                topMargin = stripLocation[1] - rootLocation[1]
+            }
+            root.addView(proxy, params)
+            moreModesTaskbarTouchProxy = proxy
+        }
+    }
+
     private fun closeMoreModes(resetEditing: Boolean = true) {
+        moreModesTaskbarTouchProxy?.let { root.removeView(it) }
+        moreModesTaskbarTouchProxy = null
         moreModesOverlay?.let { root.removeView(it) }
         moreModesOverlay = null
         if (resetEditing) modeEditing = false
