@@ -55,11 +55,11 @@ jobs:
             echo "SamsungCamera Gallery-related source matches"
             echo "==========================================="
             rg -n -i -C 35 --glob '*.java' \
-              'GalleryActivity|com\\.sec\\.android\\.gallery3d|bucketId|mediaTypes|ACTION_VIEW|ACTION_PICK|ACTION_GET_CONTENT|openGallery|camera.?roll|MediaStore' \
+              'GalleryActivity|com\.sec\\.android\\.gallery3d|bucketId|mediaTypes|ACTION_VIEW|ACTION_PICK|ACTION_GET_CONTENT|openGallery|camera.?roll|gallery|album|MediaStore' \
               "$OUT" || true
           } > gallery-reference/matches.txt
           rg -l -i --glob '*.java' \
-            'GalleryActivity|com\\.sec\\.android\\.gallery3d|bucketId|mediaTypes|openGallery|camera.?roll' \
+            'GalleryActivity|com\.sec\\.android\\.gallery3d|bucketId|mediaTypes|openGallery|camera.?roll|gallery|album' \
             "$OUT" > "$RUNNER_TEMP/matched-files.txt" || true
           while IFS= read -r file; do
             rel="${file#"$OUT"/}"
