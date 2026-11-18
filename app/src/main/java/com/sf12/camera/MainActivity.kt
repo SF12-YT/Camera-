@@ -2105,7 +2105,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // from the URI or from the intent extras, so provide both.
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI.buildUpon()
                 .appendQueryParameter("bucketId", bucketId)
-                .appendQueryParameter("mediaTypes", "5")
                 .build()
         } catch (_: Exception) {
             null
@@ -2143,6 +2142,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Do not pin GalleryActivity/GalleryOpaqueActivity: Samsung firmware
         // versions route these intents differently.
         val galleryIntent = Intent(Intent.ACTION_VIEW, albumUri).apply {
+            // Explicitly mark this as an album directory, not a single image item.
+            setDataAndType(albumUri, "vnd.android.cursor.dir/image")
             setPackage(galleryPackage)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra("windowTitle", "Camera")
