@@ -1089,8 +1089,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         primaryModes.remove("Pro Video")
         moreModes.remove("Pro")
         primaryModes.remove("Pro")
+        // If an earlier capability check removed Portrait from both saved lists,
+        // restore it to its original primary-strip position. Otherwise preserve
+        // the user's existing mode arrangement.
+        if ("Portrait" !in primaryModes && "Portrait" !in moreModes) {
+            primaryModes.add(0, "Portrait")
+        }
         val availableBaseModes = listOf(
-            "Portrait", "Photo", "Video", "Night", "Single Take",
+            "Photo", "Video", "Night", "Single Take",
             "Food", "Panorama", "Hyperlapse", "Portrait Video"
         )
         availableBaseModes.forEach { mode ->
