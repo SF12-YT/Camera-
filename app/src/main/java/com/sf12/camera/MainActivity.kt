@@ -1163,7 +1163,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
             val capabilities = characteristics.get(
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
-            ).orEmpty()
+            ) ?: intArrayOf()
             val isLogicalMultiCamera = capabilities.contains(
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
             )
