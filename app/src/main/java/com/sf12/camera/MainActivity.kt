@@ -429,11 +429,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (edgeBouncePlayed) return
                 edgeBouncePlayed = true
                 modeRow.animate().cancel()
-                modeRow.translationX = direction * dp(6).toFloat()
+                modeRow.translationX = direction * dp(8).toFloat()
                 modeRow.animate()
                     .translationX(0f)
-                    .setDuration(310L)
-                    .setInterpolator(OvershootInterpolator(1.15f))
+                    .setDuration(340L)
+                    .setInterpolator(OvershootInterpolator(1.25f))
                     .start()
             }
         }
@@ -1191,7 +1191,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun showMoreModes() {
         closeMoreModes(resetEditing = false)
         val overlay = object : FrameLayout(this) {
-            private var passThroughModeStripGesture = false
+            private var forwardingModeStripGesture = false
 
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
@@ -1199,18 +1199,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     modeScroll.getLocationOnScreen(location)
                     val x = event.rawX
                     val y = event.rawY
-                    passThroughModeStripGesture =
+                    forwardingModeStripGesture =
                         x >= location[0] && x < location[0] + modeScroll.width &&
                         y >= location[1] && y < location[1] + modeScroll.height
                 }
 
-                if (passThroughModeStripGesture) {
+                if (forwardingModeStripGesture) {
+                    // A child overlay cannot fall through to a sibling beneath it.
+                    // Relay the complete gesture directly to the real HorizontalScrollView.
+                    val location = IntArray(2)
+                    modeScroll.getLocationOnScreen(location)
+                    val forwarded = MotionEvent.obtain(event)
+                    forwarded.setLocation(
+                        event.rawX - location[0],
+                        event.rawY - location[1]
+                    )
+                    val handled = try {
+                        modeScroll.dispatchTouchEvent(forwarded)
+                    } finally {
+                        forwarded.recycle()
+                    }
+
                     if (event.actionMasked == MotionEvent.ACTION_UP ||
                         event.actionMasked == MotionEvent.ACTION_CANCEL
                     ) {
-                        passThroughModeStripGesture = false
+                        forwardingModeStripGesture = false
                     }
-                    return false
+                    return handled || forwardingModeStripGesture
                 }
                 return super.dispatchTouchEvent(event)
             }
