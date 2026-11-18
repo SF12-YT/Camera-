@@ -1150,6 +1150,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         if (mode !in primaryModes) return
+        if (moreModesOverlay != null) closeMoreModes()
 
         activePrimaryMode = mode
         activeMode = mode
@@ -1189,8 +1190,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun showMoreModes() {
         closeMoreModes(resetEditing = false)
-        val overlay = FrameLayout(this).apply {
-            // 70% transparent black over the same live camera screen.
+        val overlay = object : FrameLayout(this) {
+            private var passThroughModeStripGesture = false
+
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    val location = IntArray(2)
+                    modeScroll.getLocationOnScreen(location)
+                    val x = event.rawX
+                    val y = event.rawY
+                    passThroughModeStripGesture =
+                        x >= location[0] && x < location[0] + modeScroll.width &&
+                        y >= location[1] && y < location[1] + modeScroll.height
+                }
+
+                if (passThroughModeStripGesture) {
+                    if (event.actionMasked == MotionEvent.ACTION_UP ||
+                        event.actionMasked == MotionEvent.ACTION_CANCEL
+                    ) {
+                        passThroughModeStripGesture = false
+                    }
+                    return false
+                }
+                return super.dispatchTouchEvent(event)
+            }
+        }.apply {
+            // Keep the MORE panel dimming the live preview, while the real mode strip
+            // underneath remains touchable and horizontally scrollable.
             setBackgroundColor(0x4D000000)
             if (!modeEditing) {
                 setOnClickListener { closeMoreModes() }
@@ -3063,14 +3089,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             when (mode) {
                 "Night" -> {
+                    // A clean filled crescent keeps the silhouette balanced at small sizes.
                     val moon = android.graphics.Path().apply {
-                        moveTo(16.5f, 3f)
-                        cubicTo(8.5f, 4f, 5.5f, 10f, 7.5f, 16f)
-                        cubicTo(10f, 22f, 17f, 22f, 21f, 16f)
-                        cubicTo(14f, 19f, 9f, 13f, 11f, 8f)
-                        cubicTo(12f, 5.5f, 14f, 4f, 16.5f, 3f)
+                        moveTo(18.5f, 3.8f)
+                        cubicTo(14.2f, 5.7f, 12.3f, 9.2f, 12.6f, 12.4f)
+                        cubicTo(12.9f, 16.5f, 16.0f, 19.3f, 20.0f, 19.0f)
+                        cubicTo(17.9f, 21.0f, 15.0f, 22.0f, 12.0f, 21.7f)
+                        cubicTo(5.8f, 21.2f, 2.0f, 16.2f, 2.6f, 10.3f)
+                        cubicTo(3.2f, 4.0f, 9.0f, 0.5f, 15.0f, 2.0f)
+                        cubicTo(16.5f, 2.3f, 17.7f, 2.9f, 18.5f, 3.8f)
+                        close()
                     }
-                    canvas.drawPath(moon, p)
+                    val moonPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = p.color
+                        style = android.graphics.Paint.Style.FILL
+                    }
+                    canvas.drawPath(moon, moonPaint)
                 }
                 "Single Take" -> {
                     canvas.drawCircle(12f, 12f, 8.8f, p)
@@ -3087,27 +3121,82 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     canvas.drawArc(android.graphics.RectF(14f, 6.5f, 18f, 11f), 180f, 180f, false, p)
                 }
                 "Panorama" -> {
-                    val shape = android.graphics.Path().apply {
-                        moveTo(3f, 8f)
-                        quadTo(12f, 2f, 21f, 8f)
-                        lineTo(21f, 16f)
-                        quadTo(12f, 22f, 3f, 16f)
+                    // Curved wrap-around frame with a mountain range inside.
+                    val wrapFrame = android.graphics.Path().apply {
+                        moveTo(2.5f, 8.2f)
+                        cubicTo(7.0f, 4.2f, 17.0f, 4.2f, 21.5f, 8.2f)
+                        lineTo(21.5f, 15.8f)
+                        cubicTo(17.0f, 19.8f, 7.0f, 19.8f, 2.5f, 15.8f)
                         close()
                     }
-                    canvas.drawPath(shape, p)
+                    canvas.drawPath(wrapFrame, p)
+                    val mountain = android.graphics.Path().apply {
+                        moveTo(5.0f, 15.2f)
+                        lineTo(9.0f, 10.7f)
+                        lineTo(11.7f, 13.2f)
+                        lineTo(15.0f, 9.5f)
+                        lineTo(19.0f, 15.2f)
+                    }
+                    canvas.drawPath(mountain, p)
                 }
                 "Super Slow-Mo" -> {
-                    canvas.drawOval(android.graphics.RectF(3f, 5f, 21f, 19f), p)
-                    canvas.drawCircle(16f, 12f, 2f, p)
+                    // Three ball-like frames, fading away to show progressively slower motion.
+                    val ballPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        style = android.graphics.Paint.Style.FILL
+                    }
+                    val base = p.color
+                    fun drawBall(x: Float, opacity: Int) {
+                        ballPaint.color = android.graphics.Color.argb(
+                            android.graphics.Color.alpha(base) * opacity / 255,
+                            android.graphics.Color.red(base),
+                            android.graphics.Color.green(base),
+                            android.graphics.Color.blue(base)
+                        )
+                        canvas.drawCircle(x, 12f, 3.6f, ballPaint)
+                    }
+                    drawBall(5.5f, 255)
+                    drawBall(12f, 150)
+                    drawBall(18.5f, 72)
                 }
                 "Slow-Mo" -> {
-                    canvas.drawCircle(12f, 12f, 8.8f, p)
-                    canvas.drawCircle(12f, 12f, 2.2f, p)
+                    // Two adjacent balls; the trailing one is dimmer to imply motion.
+                    val ballPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        style = android.graphics.Paint.Style.FILL
+                    }
+                    val base = p.color
+                    fun drawBall(x: Float, opacity: Int) {
+                        ballPaint.color = android.graphics.Color.argb(
+                            android.graphics.Color.alpha(base) * opacity / 255,
+                            android.graphics.Color.red(base),
+                            android.graphics.Color.green(base),
+                            android.graphics.Color.blue(base)
+                        )
+                        canvas.drawCircle(x, 12f, 4.2f, ballPaint)
+                    }
+                    drawBall(8f, 255)
+                    drawBall(16.5f, 95)
                 }
                 "Hyperlapse" -> {
-                    canvas.drawOval(android.graphics.RectF(2.5f, 4.5f, 21.5f, 19.5f), p)
-                    canvas.drawLine(6f, 12f, 16f, 12f, p)
-                    canvas.drawCircle(18f, 12f, 1.2f, p)
+                    // Faded streaks trail to the left of a prominent moving circle.
+                    val streakPaint = android.graphics.Paint(p).apply {
+                        style = android.graphics.Paint.Style.STROKE
+                        strokeWidth = 1.5f
+                        strokeCap = android.graphics.Paint.Cap.ROUND
+                    }
+                    val base = p.color
+                    fun drawStreak(y: Float, endX: Float, opacity: Int) {
+                        streakPaint.color = android.graphics.Color.argb(
+                            android.graphics.Color.alpha(base) * opacity / 255,
+                            android.graphics.Color.red(base),
+                            android.graphics.Color.green(base),
+                            android.graphics.Color.blue(base)
+                        )
+                        canvas.drawLine(2.5f, y, endX, y, streakPaint)
+                    }
+                    drawStreak(8f, 8.2f, 65)
+                    drawStreak(12f, 10.0f, 105)
+                    drawStreak(16f, 8.2f, 65)
+                    canvas.drawCircle(17.2f, 12f, 4.4f, p)
                 }
                 "Portrait Video" -> {
                     canvas.drawCircle(10f, 7.5f, 3f, p)
