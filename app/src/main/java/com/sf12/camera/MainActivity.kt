@@ -2138,16 +2138,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        // Let Samsung Gallery's own intent filter select its album viewer.
-        // Do not pin GalleryActivity/GalleryOpaqueActivity: Samsung firmware
-        // versions route these intents differently.
-        val galleryIntent = Intent(Intent.ACTION_VIEW, albumUri).apply {
-            // Use the standard MediaStore bucket URI without forcing a MIME type
-            // or Gallery3D-specific mediaTypes flags. Samsung Gallery handles
-            // the bucket URI itself and decides how to display the album.
-            setPackage(galleryPackage)
+        // Force Samsung Gallery's album viewer to receive this as a directory.
+        // The explicit component is important on Samsung firmware: its implicit
+        // ACTION_VIEW resolution can fall back to the Gallery launcher instead.
+        val galleryIntent = Intent(Intent.ACTION_VIEW).apply {
+            setClassName(
+                galleryPackage,
+                "com.sec.android.gallery3d.app.GalleryActivity"
+            )
+            setDataAndType(albumUri, "vnd.android.cursor.dir/image")
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             putExtra("windowTitle", "Camera")
+            // Gallery3D flags: include images (1) and videos (4).
+            putExtra("mediaTypes", 5)
         }
 
         try {
