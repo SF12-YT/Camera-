@@ -1214,7 +1214,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         event.rawX - location[0],
                         event.rawY - location[1]
                     )
-                    val handled = try {
+                    try {
                         modeScroll.dispatchTouchEvent(forwarded)
                     } finally {
                         forwarded.recycle()
@@ -1225,7 +1225,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     ) {
                         forwardingModeStripGesture = false
                     }
-                    return handled || forwardingModeStripGesture
+                    // Keep ownership of this gesture until its final event.
+                    return true
                 }
                 return super.dispatchTouchEvent(event)
             }
