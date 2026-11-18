@@ -19,8 +19,6 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.params.OutputConfiguration
-import android.hardware.camera2.params.SessionConfiguration
 import android.graphics.ImageFormat
 import android.media.ImageReader
 import android.net.Uri
@@ -54,7 +52,6 @@ import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executor
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -1195,162 +1192,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 reason = "Camera capability query failed: ${e.message ?: "unknown error"}"
             )
         }
-    }
-
-    private fun detectRearPortraitCameraSupport(
-        device: CameraDevice,
-        openedCameraId: String
-    ): PortraitCameraSupport {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            return PortraitCameraSupport(
-                available = false,
-                reason = "Camera2 multi-camera requires Android 9 or newer."
-            )
-        }
-
-        return try {
-            val characteristics = cameraManager.getCameraCharacteristics(openedCameraId)
-            if (characteristics.get(CameraCharacteristics.LENS_FACING) !=
-                CameraCharacteristics.LENS_FACING_BACK
-            ) {
-                return PortraitCameraSupport(
-                    available = false,
-                    reason = "The active camera is not rear-facing."
-                )
-            }
-
-            val capabilities = characteristics.get(
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
-            ) ?: intArrayOf()
-            val isLogicalMultiCamera = capabilities.contains(
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
-            )
-            val physicalIds = if (isLogicalMultiCamera) {
-                characteristics.physicalCameraIds.toList().distinct()
-            } else {
-                emptyList()
-            }
-
-            // Prefer a logical rear camera exposing two physical sensors. Verify
-            // that both physical outputs can exist in the same capture session.
-            if (physicalIds.size >= 2 &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                supportsDualPhysicalStreams(device, characteristics, physicalIds.take(2))
-            ) {
-                return PortraitCameraSupport(
-                    available = true,
-                    route = "logical-physical",
-                    logicalCameraId = openedCameraId,
-                    physicalCameraIds = physicalIds,
-                    reason = "Two rear physical cameras can stream in one session."
-                )
-            }
-
-            // Some devices expose rear sensors as separate camera IDs instead
-            // of physical IDs belonging to one logical camera.
-            val concurrentPair = findConcurrentRearCameraPair()
-            if (concurrentPair != null) {
-                return PortraitCameraSupport(
-                    available = true,
-                    route = "concurrent-camera-ids",
-                    concurrentCameraIds = concurrentPair,
-                    reason = "Two rear camera IDs are advertised for concurrent operation."
-                )
-            }
-
-            PortraitCameraSupport(
-                available = false,
-                logicalCameraId = openedCameraId.takeIf { isLogicalMultiCamera },
-                physicalCameraIds = physicalIds,
-                reason = if (physicalIds.size >= 2) {
-                    "Multiple physical sensors were found, but a dual-stream session was not supported."
-                } else {
-                    "No simultaneous pair of rear cameras was reported."
-                }
-            )
-        } catch (e: CameraAccessException) {
-            PortraitCameraSupport(
-                available = false,
-                reason = "Camera capability query failed: ${e.reason}"
-            )
-        } catch (e: RuntimeException) {
-            PortraitCameraSupport(
-                available = false,
-                reason = "Camera capability query failed: ${e.message ?: "unknown error"}"
-            )
-        }
-    }
-
-    private fun supportsDualPhysicalStreams(
-        device: CameraDevice,
-        logicalCharacteristics: CameraCharacteristics,
-        physicalIds: List<String>
-    ): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || physicalIds.size < 2) {
-            return false
-        }
-
-        val streamMap = logicalCharacteristics.get(
-            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
-        ) ?: return false
-        val previewSizes = streamMap.getOutputSizes(SurfaceTexture::class.java)?.toList()
-            .orEmpty()
-        val testSize = previewSizes.minByOrNull {
-            abs(it.width - 640) + abs(it.height - 480)
-        } ?: return false
-
-        val textures = mutableListOf<SurfaceTexture>()
-        val surfaces = mutableListOf<Surface>()
-        return try {
-            val outputs = physicalIds.take(2).map { physicalId ->
-                val texture = SurfaceTexture(0).apply {
-                    setDefaultBufferSize(testSize.width, testSize.height)
-                }
-                val surface = Surface(texture)
-                textures.add(texture)
-                surfaces.add(surface)
-                OutputConfiguration(surface).apply {
-                    setPhysicalCameraId(physicalId)
-                }
-            }
-
-            val configuration = SessionConfiguration(
-                SessionConfiguration.SESSION_REGULAR,
-                outputs,
-                Executor { command -> command.run() },
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        session.close()
-                    }
-
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        session.close()
-                    }
-                }
-            )
-            device.isSessionConfigurationSupported(configuration)
-        } catch (_: Exception) {
-            false
-        } finally {
-            surfaces.forEach { it.release() }
-            textures.forEach { it.release() }
-        }
-    }
-
-    private fun findConcurrentRearCameraPair(): List<String>? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-
-        val rearCameraIds = cameraManager.cameraIdList.filter { id ->
-            cameraManager.getCameraCharacteristics(id)
-                .get(CameraCharacteristics.LENS_FACING) ==
-                CameraCharacteristics.LENS_FACING_BACK
-        }.toSet()
-
-        return cameraManager.concurrentCameraIds
-            .asSequence()
-            .map { combination -> combination.filter { it in rearCameraIds }.distinct() }
-            .firstOrNull { it.size >= 2 }
-            ?.take(2)
     }
 
     private fun rebuildModeStrip() {
