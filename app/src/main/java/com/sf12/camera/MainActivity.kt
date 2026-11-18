@@ -124,6 +124,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val isAvailable: Boolean = true,
         val status: String = ""
     )
+
+    private data class CameraGalleryItem(
+        val uri: Uri,
+        val mimeType: String,
+        val dateTaken: Long,
+        val filePath: String?,
+        val orientation: Int
+    )
     private val knownCameraModes = listOf(
         "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
         "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
@@ -2043,39 +2051,48 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     /**
-     * Builds a Samsung Gallery album URI for the DCIM/Camera bucket.
-     *
-     * Samsung Gallery accepts the Android Gallery3D bucketId directory URI.
-     * This opens the Camera album grid rather than a single photo or the
-     * Gallery landing page.
+     * Gets the newest image or video in the selected DCIM/Camera folder.
+     * Samsung Camera passes the selected media item to Gallery, not a
+     * bucketId directory URI.
      */
-    private fun findCameraAlbumUri(): Uri? {
+    private fun findLatestCameraGalleryItem(): CameraGalleryItem? {
         return try {
+            val storage = selectedCameraStorageLocation()
             val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                selectedCameraStorageLocation()?.volumeName
-                    ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+                storage?.volumeName ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
             } else {
                 "external"
             }
             val filesUri = MediaStore.Files.getContentUri(volumeName)
-            val projection = arrayOf(MediaStore.MediaColumns.BUCKET_ID)
-            val cameraPath = Environment.DIRECTORY_DCIM + "/Camera/"
+            val idColumn = MediaStore.MediaColumns._ID
+            val mediaTypeColumn = MediaStore.Files.FileColumns.MEDIA_TYPE
+            val projection = arrayOf(
+                idColumn,
+                mediaTypeColumn,
+                MediaStore.MediaColumns.DATE_TAKEN,
+                MediaStore.MediaColumns.DATE_ADDED,
+                MediaStore.MediaColumns.ORIENTATION,
+                MediaStore.MediaColumns.DATA
+            )
             val selection: String
             val selectionArgs: Array<String>
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                selection = "(${MediaStore.MediaColumns.RELATIVE_PATH} = ? OR " +
-                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ?) AND " +
-                    "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
+                val relativePath = MediaStore.MediaColumns.RELATIVE_PATH
+                selection = "(" + relativePath + " = ? OR " +
+                    relativePath + " = ? OR " +
+                    relativePath + " LIKE ?) AND " +
+                    mediaTypeColumn + " IN (?, ?)"
                 selectionArgs = arrayOf(
-                    cameraPath,
+                    Environment.DIRECTORY_DCIM + "/Camera/",
                     Environment.DIRECTORY_DCIM + "/Camera",
+                    Environment.DIRECTORY_DCIM + "/Camera/%",
                     MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
                     MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
                 )
             } else {
-                selection = "${MediaStore.MediaColumns.DATA} LIKE ? AND " +
-                    "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
+                selection = MediaStore.MediaColumns.DATA + " LIKE ? AND " +
+                    mediaTypeColumn + " IN (?, ?)"
                 selectionArgs = arrayOf(
                     "%/DCIM/Camera/%",
                     MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
@@ -2083,31 +2100,102 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 )
             }
 
-            val bucketId = contentResolver.query(
+            contentResolver.query(
                 filesUri,
                 projection,
                 selection,
                 selectionArgs,
-                "${MediaStore.MediaColumns.DATE_ADDED} DESC, " +
-                    "${MediaStore.MediaColumns._ID} DESC"
+                MediaStore.MediaColumns.DATE_TAKEN + " DESC, " +
+                    MediaStore.MediaColumns.DATE_ADDED + " DESC, " +
+                    MediaStore.MediaColumns._ID + " DESC"
             )?.use { cursor ->
-                if (cursor.moveToFirst() && !cursor.isNull(0)) {
-                    cursor.getString(0)
-                } else {
+                if (!cursor.moveToFirst()) {
                     null
-                }
-            } ?: return null
+                } else {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(idColumn))
+                    val mediaType = cursor.getInt(cursor.getColumnIndexOrThrow(mediaTypeColumn))
+                    val isVideo = mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+                    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        if (isVideo) {
+                            MediaStore.Video.Media.getContentUri(volumeName)
+                        } else {
+                            MediaStore.Images.Media.getContentUri(volumeName)
+                        }
+                    } else {
+                        if (isVideo) {
+                            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                        } else {
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                        }
+                    }
+                    val dateTakenIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
+                    val dateAddedIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+                    val orientationIndex = cursor.getColumnIndex(MediaStore.MediaColumns.ORIENTATION)
+                    val pathIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    val dateTaken = if (dateTakenIndex >= 0) cursor.getLong(dateTakenIndex) else 0L
+                    val dateAdded = if (dateAddedIndex >= 0) cursor.getLong(dateAddedIndex) else 0L
+                    val orientation = if (!isVideo && orientationIndex >= 0) {
+                        cursor.getInt(orientationIndex)
+                    } else {
+                        0
+                    }
+                    val filePath = if (pathIndex >= 0 && !cursor.isNull(pathIndex)) {
+                        cursor.getString(pathIndex)
+                    } else {
+                        null
+                    }
 
-            // Gallery3D reads the bucketId parameter and mediaTypes extra
-            // to build the album, including both photos and videos.
-            // Android Camera launches Gallery albums through the external
-            // images collection. Gallery3D variants either read mediaTypes
-            // from the URI or from the intent extras, so provide both.
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI.buildUpon()
-                .appendQueryParameter("bucketId", bucketId)
-                .build()
+                    CameraGalleryItem(
+                        uri = ContentUris.withAppendedId(collection, id),
+                        mimeType = if (isVideo) "video/*" else "image/*",
+                        dateTaken = if (dateTaken > 0L) dateTaken else dateAdded * 1000L,
+                        filePath = filePath,
+                        orientation = orientation
+                    )
+                }
+            }
         } catch (_: Exception) {
             null
+        }
+    }
+
+    /**
+     * Mirrors Samsung Camera's "viewbuckets" extra for its Gallery activity.
+     * Bucket IDs are the lowercase-path hashes Gallery3D expects.
+     */
+    private fun cameraGalleryViewBuckets(): ArrayList<Int> {
+        val storageRoots = linkedSetOf(
+            Environment.getExternalStorageDirectory().absolutePath
+        )
+        val storageManager = getSystemService(Context.STORAGE_SERVICE) as? StorageManager
+        storageManager?.storageVolumes?.forEach { volume ->
+            if (!volume.isRemovable) return@forEach
+            if (volume.state != Environment.MEDIA_MOUNTED &&
+                volume.state != Environment.MEDIA_MOUNTED_READ_ONLY
+            ) {
+                return@forEach
+            }
+            val path = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                volume.directory?.absolutePath
+            } else {
+                null
+            } ?: volume.uuid?.let { "/storage/" + it }
+            if (!path.isNullOrBlank()) storageRoots.add(path)
+        }
+
+        val cameraFolders = listOf(
+            "DCIM/Camera",
+            "DCIM/AR Emoji camera",
+            "DCIM/Bixby Vision",
+            "DCIM/AR Doodle",
+            "DCIM/Deco Pic"
+        )
+        return ArrayList<Int>().apply {
+            storageRoots.forEach { root ->
+                cameraFolders.forEach { folder ->
+                    add((root + "/" + folder).lowercase(Locale.US).hashCode())
+                }
+            }
         }
     }
 
@@ -2123,8 +2211,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         val galleryPackage = "com.sec.android.gallery3d"
-        val albumUri = findCameraAlbumUri()
-        if (albumUri == null) {
+        val media = findLatestCameraGalleryItem()
+        if (media == null) {
             val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
             if (launchIntent != null) {
                 startActivity(launchIntent)
@@ -2138,27 +2226,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
 
-        // Force Samsung Gallery's album viewer to receive this as a directory.
-        // The explicit component is important on Samsung firmware: its implicit
-        // ACTION_VIEW resolution can fall back to the Gallery launcher instead.
+        // This follows Samsung Camera's own GalleryIntentHelper contract:
+        // open the latest media item and provide the Camera bucket list.
         val galleryIntent = Intent(Intent.ACTION_VIEW).apply {
             setClassName(
                 galleryPackage,
                 "com.sec.android.gallery3d.app.GalleryActivity"
             )
-            setDataAndType(albumUri, "vnd.android.cursor.dir/image")
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            setDataAndType(media.uri, media.mimeType)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            putExtra("windowTitle", "Camera")
-            // Gallery3D flags: include images (1) and videos (4).
-            putExtra("mediaTypes", 5)
+            putExtra("from-Camera", true)
+            putExtra("date", media.dateTaken)
+            putExtra("filepath", media.filePath)
+            putExtra("orientation", media.orientation)
+            putIntegerArrayListExtra("viewbuckets", cameraGalleryViewBuckets())
         }
 
         try {
             startActivity(galleryIntent)
         } catch (_: Exception) {
-            // The album route is the primary path. If this firmware exposes
-            // no matching VIEW activity, open the installed Gallery app.
             try {
                 val launchIntent = packageManager.getLaunchIntentForPackage(galleryPackage)
                 if (launchIntent != null) {
