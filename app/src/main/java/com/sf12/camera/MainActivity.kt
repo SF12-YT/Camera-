@@ -10,7 +10,11 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraAccessException
@@ -19,6 +23,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.MeteringRectangle
 import android.graphics.ImageFormat
 import android.media.ImageReader
 import android.net.Uri
@@ -48,6 +53,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -59,6 +65,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private lateinit var root: FrameLayout
     private lateinit var previewView: TextureView
+    private lateinit var focusIndicator: View
     private lateinit var topPanel: LinearLayout
     private lateinit var bottomPanel: LinearLayout
     private lateinit var topGradientView: View
@@ -90,11 +97,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var imageReader: ImageReader? = null
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var cameraId: String? = null
+    private var focusMeteringRegion: MeteringRectangle? = null
+    @Volatile private var portraitCapturePending = false
+    @Volatile private var portraitCaptureRotation = 0
+    @Volatile private var portraitFocusX = 0.5f
+    @Volatile private var portraitFocusY = 0.42f
     private var previewSize: Size? = null
     private var previewSurface: Surface? = null
     private var backgroundThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val hideFocusIndicatorRunnable = Runnable {
+        if (::focusIndicator.isInitialized) {
+            focusIndicator.animate()
+                .alpha(0f)
+                .setDuration(220L)
+                .withEndAction { focusIndicator.visibility = View.GONE }
+                .start()
+        }
+    }
 
     private var lensFacing = CameraCharacteristics.LENS_FACING_BACK
     private var activeTab = "Basic"
@@ -266,6 +287,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
+        )
+        focusIndicator = View(this).apply {
+            background = rounded(Color.TRANSPARENT, 9, 0xFFFFD54F.toInt())
+            visibility = View.GONE
+            alpha = 1f
+            contentDescription = "Focus point"
+            elevation = dp(8).toFloat()
+        }
+        root.addView(
+            focusIndicator,
+            FrameLayout.LayoutParams(dp(72), dp(72))
         )
 
         topGradientView = View(this).apply {
@@ -591,6 +623,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             this,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(event: MotionEvent): Boolean = true
+
+                override fun onSingleTapUp(event: MotionEvent): Boolean {
+                    if (gestureHadMultiplePointers || event.pointerCount > 1) return false
+                    focusAtPoint(event.x, event.y)
+                    return true
+                }
 
                 override fun onFling(
                     first: MotionEvent?,
@@ -2015,16 +2053,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val device = cameraDevice ?: return
         val session = captureSession ?: return
         val reader = imageReader ?: return
+        val portraitCapture = activeMode == "Portrait"
+        val rotation = jpegOrientation()
+        portraitCapturePending = portraitCapture
+        portraitCaptureRotation = rotation
         try {
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AF_MODE, currentAfMode())
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                applyFocusRegions(this)
                 setFlashForRequest(this)
                 applyFilter(this)
                 applyZoom(this)
-                set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation())
+                // Portrait processing rotates the decoded pixels itself, so it
+                // requests an unrotated JPEG and avoids retaining stale EXIF rotation.
+                set(CaptureRequest.JPEG_ORIENTATION, if (portraitCapture) 0 else rotation)
             }
             session.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -2036,8 +2081,194 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }, cameraHandler)
         } catch (e: CameraAccessException) {
+            portraitCapturePending = false
             Toast.makeText(this, "Capture failed: ${e.reason}", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun applyFocusRegions(builder: CaptureRequest.Builder) {
+        val region = focusMeteringRegion ?: return
+        val characteristics = cameraCharacteristics ?: return
+        if ((characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0) {
+            builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(region))
+        }
+        if ((characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0) {
+            builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(region))
+        }
+    }
+
+    /**
+     * Produces a conventional, tap-centred portrait blur. The clear oval is
+     * deliberately manual: it avoids AI segmentation and remains available
+     * on single-camera devices, but it is not a depth-aware subject mask.
+     */
+    private fun createPortraitJpeg(
+        jpeg: ByteArray,
+        focusX: Float,
+        focusY: Float,
+        rotation: Int
+    ): ByteArray {
+        val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+            ?: throw IllegalStateException("The captured JPEG could not be decoded")
+        val oriented = if (rotation % 360 != 0) {
+            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                .also { if (it !== decoded) decoded.recycle() }
+        } else {
+            decoded
+        }
+
+        val width = oriented.width
+        val height = oriented.height
+        val scale = minOf(1f, 1400f / max(width, height).toFloat())
+        val smallWidth = (width * scale).toInt().coerceAtLeast(1)
+        val smallHeight = (height * scale).toInt().coerceAtLeast(1)
+        val small = Bitmap.createScaledBitmap(oriented, smallWidth, smallHeight, true)
+
+        val originalPixels = IntArray(width * height)
+        oriented.getPixels(originalPixels, 0, width, 0, 0, width, height)
+        val smallPixels = IntArray(smallWidth * smallHeight)
+        small.getPixels(smallPixels, 0, smallWidth, 0, 0, smallWidth, smallHeight)
+        if (small !== oriented) small.recycle()
+        oriented.recycle()
+
+        val blurredPixels = blurArgbPixels(
+            smallPixels,
+            smallWidth,
+            smallHeight,
+            12
+        )
+        val outputPixels = IntArray(originalPixels.size)
+        val centreX = focusX.coerceIn(0f, 1f) * width
+        val centreY = focusY.coerceIn(0f, 1f) * height
+        val radiusX = (width * 0.40f).coerceAtLeast(1f)
+        val radiusY = (height * 0.46f).coerceAtLeast(1f)
+        val transitionStart = 0.58f
+        val transitionEnd = 1.55f
+
+        for (y in 0 until height) {
+            val dy = (y + 0.5f - centreY) / radiusY
+            val sampleY = ((y.toLong() * smallHeight) / height)
+                .toInt().coerceIn(0, smallHeight - 1)
+            val outputRow = y * width
+            val blurRow = sampleY * smallWidth
+            for (x in 0 until width) {
+                val dx = (x + 0.5f - centreX) / radiusX
+                val distanceSquared = dx * dx + dy * dy
+                var blurAmount = ((distanceSquared - transitionStart) /
+                    (transitionEnd - transitionStart)).coerceIn(0f, 1f)
+                blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
+
+                val index = outputRow + x
+                val original = originalPixels[index]
+                if (blurAmount <= 0.002f) {
+                    outputPixels[index] = original
+                } else {
+                    val sampleX = ((x.toLong() * smallWidth) / width)
+                        .toInt().coerceIn(0, smallWidth - 1)
+                    val blurred = blurredPixels[blurRow + sampleX]
+                    val sharpWeight = 1f - blurAmount
+                    val red = ((((original shr 16) and 0xFF) * sharpWeight) +
+                        (((blurred shr 16) and 0xFF) * blurAmount)).toInt()
+                    val green = ((((original shr 8) and 0xFF) * sharpWeight) +
+                        (((blurred shr 8) and 0xFF) * blurAmount)).toInt()
+                    val blue = (((original and 0xFF) * sharpWeight) +
+                        ((blurred and 0xFF) * blurAmount)).toInt()
+                    outputPixels[index] = (0xFF shl 24) or
+                        (red.coerceIn(0, 255) shl 16) or
+                        (green.coerceIn(0, 255) shl 8) or
+                        blue.coerceIn(0, 255)
+                }
+            }
+        }
+
+        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        output.setPixels(outputPixels, 0, width, 0, 0, width, height)
+        val stream = ByteArrayOutputStream()
+        val compressed = output.compress(Bitmap.CompressFormat.JPEG, 94, stream)
+        output.recycle()
+        if (!compressed) throw IllegalStateException("Portrait JPEG encoding failed")
+        return stream.toByteArray()
+    }
+
+    private fun blurArgbPixels(
+        source: IntArray,
+        width: Int,
+        height: Int,
+        radius: Int
+    ): IntArray {
+        var pixels = source
+        repeat(3) {
+            pixels = boxBlurPass(pixels, width, height, radius, horizontal = true)
+            pixels = boxBlurPass(pixels, width, height, radius, horizontal = false)
+        }
+        return pixels
+    }
+
+    private fun boxBlurPass(
+        source: IntArray,
+        width: Int,
+        height: Int,
+        radius: Int,
+        horizontal: Boolean
+    ): IntArray {
+        val output = IntArray(source.size)
+        val window = radius * 2 + 1
+        if (horizontal) {
+            for (y in 0 until height) {
+                val row = y * width
+                var alpha = 0
+                var red = 0
+                var green = 0
+                var blue = 0
+                for (offset in -radius..radius) {
+                    val pixel = source[row + offset.coerceIn(0, width - 1)]
+                    alpha += (pixel ushr 24) and 0xFF
+                    red += (pixel shr 16) and 0xFF
+                    green += (pixel shr 8) and 0xFF
+                    blue += pixel and 0xFF
+                }
+                for (x in 0 until width) {
+                    output[row + x] = ((alpha / window) shl 24) or
+                        ((red / window) shl 16) or
+                        ((green / window) shl 8) or
+                        (blue / window)
+                    val remove = source[row + (x - radius).coerceIn(0, width - 1)]
+                    val add = source[row + (x + radius + 1).coerceIn(0, width - 1)]
+                    alpha += ((add ushr 24) and 0xFF) - ((remove ushr 24) and 0xFF)
+                    red += ((add shr 16) and 0xFF) - ((remove shr 16) and 0xFF)
+                    green += ((add shr 8) and 0xFF) - ((remove shr 8) and 0xFF)
+                    blue += (add and 0xFF) - (remove and 0xFF)
+                }
+            }
+        } else {
+            for (x in 0 until width) {
+                var alpha = 0
+                var red = 0
+                var green = 0
+                var blue = 0
+                for (offset in -radius..radius) {
+                    val pixel = source[offset.coerceIn(0, height - 1) * width + x]
+                    alpha += (pixel ushr 24) and 0xFF
+                    red += (pixel shr 16) and 0xFF
+                    green += (pixel shr 8) and 0xFF
+                    blue += pixel and 0xFF
+                }
+                for (y in 0 until height) {
+                    output[y * width + x] = ((alpha / window) shl 24) or
+                        ((red / window) shl 16) or
+                        ((green / window) shl 8) or
+                        (blue / window)
+                    val remove = source[(y - radius).coerceIn(0, height - 1) * width + x]
+                    val add = source[(y + radius + 1).coerceIn(0, height - 1) * width + x]
+                    alpha += ((add ushr 24) and 0xFF) - ((remove ushr 24) and 0xFF)
+                    red += ((add shr 16) and 0xFF) - ((remove shr 16) and 0xFF)
+                    green += ((add shr 8) and 0xFF) - ((remove shr 8) and 0xFF)
+                    blue += (add and 0xFF) - (remove and 0xFF)
+                }
+            }
+        }
+        return output
     }
 
     private fun setFlashForRequest(builder: CaptureRequest.Builder) {
@@ -2600,7 +2831,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 } finally {
                     image.close()
                 }
-                saveJpeg(bytes)
+                val applyPortrait = portraitCapturePending
+                val rotation = portraitCaptureRotation
+                val focusX = portraitFocusX
+                val focusY = portraitFocusY
+                portraitCapturePending = false
+                if (applyPortrait) {
+                    Thread({
+                        try {
+                            saveJpeg(createPortraitJpeg(bytes, focusX, focusY, rotation))
+                        } catch (error: Exception) {
+                            saveJpeg(bytes)
+                            runOnUiThread {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Portrait processing failed; saved the original photo.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }, "PortraitImageProcessor").start()
+                } else {
+                    saveJpeg(bytes)
+                }
             }, cameraHandler)
         }
         configurePreviewSession()
@@ -2649,26 +2902,190 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun startPreviewRepeating() {
-        val device = cameraDevice ?: return
-        val session = captureSession ?: return
-        val texture = previewView.surfaceTexture ?: return
-        try {
-            val surface = previewSurface ?: return
-            val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+    private fun currentAfMode(): Int {
+        val supported = cameraCharacteristics
+            ?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+            ?.toSet().orEmpty()
+        val canMeterFocus = focusMeteringRegion != null &&
+            (cameraCharacteristics?.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
+        return when {
+            canMeterFocus && supported.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) ->
+                CaptureRequest.CONTROL_AF_MODE_AUTO
+            supported.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE) ->
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            supported.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) ->
+                CaptureRequest.CONTROL_AF_MODE_AUTO
+            else -> CaptureRequest.CONTROL_AF_MODE_OFF
+        }
+    }
+
+    private fun createPreviewRequest(afTrigger: Int): CaptureRequest.Builder? {
+        val device = cameraDevice ?: return null
+        val surface = previewSurface ?: return null
+        return try {
+            device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(surface)
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AF_MODE, currentAfMode())
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                val region = focusMeteringRegion
+                val characteristics = cameraCharacteristics
+                if (region != null && (characteristics
+                        ?.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
+                ) {
+                    set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(region))
+                    if (currentAfMode() != CaptureRequest.CONTROL_AF_MODE_OFF) {
+                        set(CaptureRequest.CONTROL_AF_TRIGGER, afTrigger)
+                    }
+                }
+                if (region != null && (characteristics
+                        ?.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0
+                ) {
+                    set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(region))
+                }
                 applyFilter(this)
                 applyZoom(this)
             }
+        } catch (e: CameraAccessException) {
+            runOnUiThread {
+                Toast.makeText(this, "Preview error: ${e.reason}", Toast.LENGTH_SHORT).show()
+            }
+            null
+        }
+    }
+
+    private fun startPreviewRepeating() {
+        val session = captureSession ?: return
+        val request = createPreviewRequest(CaptureRequest.CONTROL_AF_TRIGGER_IDLE) ?: return
+        try {
             session.setRepeatingRequest(request.build(), null, cameraHandler)
         } catch (e: CameraAccessException) {
             runOnUiThread {
                 Toast.makeText(this, "Preview error: ${e.reason}", Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    private fun currentZoomCrop(activeArray: Rect): Rect {
+        val zoom = zoomRatio.coerceAtLeast(1f)
+        val cropWidth = (activeArray.width() / zoom).toInt().coerceAtLeast(1)
+        val cropHeight = (activeArray.height() / zoom).toInt().coerceAtLeast(1)
+        val left = activeArray.centerX() - cropWidth / 2
+        val top = activeArray.centerY() - cropHeight / 2
+        return Rect(left, top, left + cropWidth, top + cropHeight)
+    }
+
+    private fun showFocusIndicator(x: Float, y: Float) {
+        if (!::focusIndicator.isInitialized) return
+        val size = dp(72).toFloat()
+        focusIndicator.animate().cancel()
+        focusIndicator.visibility = View.VISIBLE
+        focusIndicator.alpha = 1f
+        focusIndicator.scaleX = 0.88f
+        focusIndicator.scaleY = 0.88f
+        focusIndicator.x = (x - size / 2f).coerceIn(
+            0f, (root.width - size).coerceAtLeast(0f)
+        )
+        focusIndicator.y = (y - size / 2f).coerceIn(
+            0f, (root.height - size).coerceAtLeast(0f)
+        )
+        focusIndicator.bringToFront()
+        focusIndicator.animate()
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(150L)
+            .start()
+        mainHandler.removeCallbacks(hideFocusIndicatorRunnable)
+        mainHandler.postDelayed(hideFocusIndicatorRunnable, 1_000L)
+    }
+
+    private fun focusAtPoint(viewX: Float, viewY: Float) {
+        val characteristics = cameraCharacteristics ?: return
+        val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            ?: return
+        val viewWidth = previewView.width.toFloat()
+        val viewHeight = previewView.height.toFloat()
+        if (viewWidth <= 0f || viewHeight <= 0f) return
+
+        val displayX = (viewX / viewWidth).coerceIn(0f, 1f)
+        val displayY = (viewY / viewHeight).coerceIn(0f, 1f)
+        val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val displayDegrees = when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        val rotationToDisplay = if (
+            characteristics.get(CameraCharacteristics.LENS_FACING) ==
+            CameraCharacteristics.LENS_FACING_FRONT
+        ) {
+            (sensorOrientation + displayDegrees) % 360
+        } else {
+            (sensorOrientation - displayDegrees + 360) % 360
+        }
+        val (sensorX, sensorY) = when (rotationToDisplay) {
+            90 -> displayY to (1f - displayX)
+            180 -> (1f - displayX) to (1f - displayY)
+            270 -> (1f - displayY) to displayX
+            else -> displayX to displayY
+        }
+
+        val crop = currentZoomCrop(activeArray)
+        val pointX = (crop.left + sensorX * crop.width()).toInt()
+            .coerceIn(crop.left, crop.right - 1)
+        val pointY = (crop.top + sensorY * crop.height()).toInt()
+            .coerceIn(crop.top, crop.bottom - 1)
+        val regionSize = (minOf(crop.width(), crop.height()) * 0.08f)
+            .toInt().coerceAtLeast(2)
+        val left = (pointX - regionSize / 2)
+            .coerceIn(crop.left, (crop.right - regionSize).coerceAtLeast(crop.left))
+        val top = (pointY - regionSize / 2)
+            .coerceIn(crop.top, (crop.bottom - regionSize).coerceAtLeast(crop.top))
+        focusMeteringRegion = MeteringRectangle(
+            Rect(left, top, left + regionSize, top + regionSize),
+            MeteringRectangle.METERING_WEIGHT_MAX
+        )
+        portraitFocusX = displayX
+        portraitFocusY = displayY
+        showFocusIndicator(viewX, viewY)
+
+        val session = captureSession ?: return
+        val cancel = createPreviewRequest(CaptureRequest.CONTROL_AF_TRIGGER_CANCEL) ?: return
+        val canTriggerAf = currentAfMode() != CaptureRequest.CONTROL_AF_MODE_OFF &&
+            (characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
+        if (!canTriggerAf) {
+            startPreviewRepeating()
+            return
+        }
+        try {
+            session.capture(cancel.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: android.hardware.camera2.TotalCaptureResult
+                ) {
+                    if (captureSession !== session) return
+                    val start = createPreviewRequest(CaptureRequest.CONTROL_AF_TRIGGER_START)
+                        ?: return
+                    try {
+                        session.capture(start.build(), object : CameraCaptureSession.CaptureCallback() {
+                            override fun onCaptureCompleted(
+                                session: CameraCaptureSession,
+                                request: CaptureRequest,
+                                result: android.hardware.camera2.TotalCaptureResult
+                            ) {
+                                if (captureSession === session) startPreviewRepeating()
+                            }
+                        }, cameraHandler)
+                    } catch (_: CameraAccessException) {
+                        startPreviewRepeating()
+                    }
+                }
+            }, cameraHandler)
+        } catch (_: CameraAccessException) {
+            startPreviewRepeating()
         }
     }
 
