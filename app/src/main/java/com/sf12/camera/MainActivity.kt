@@ -1056,13 +1056,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun refreshDeviceSpecificModes() {
-        // Portrait is a rear-camera-only mode. Cache the result while the rear
-        // logical camera is open so switching to the front camera doesn't remove it.
+        // Portrait is always available as a single-camera mode. This detection
+        // only records whether a future dual-camera enhancement can be offered.
         if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
-            val device = cameraDevice
             val openedId = cameraId
-            rearPortraitCameraSupport = if (device != null && openedId != null) {
-                detectRearPortraitCameraSupport(device, openedId)
+            rearPortraitCameraSupport = if (openedId != null) {
+                detectRearPortraitCameraSupport(openedId)
             } else {
                 PortraitCameraSupport(
                     available = false,
@@ -1070,7 +1069,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 )
             }
         }
-        val supportsPortrait = rearPortraitCameraSupport.available
 
         val streamMap = cameraCharacteristics
             ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -1081,12 +1079,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val supportsSuperSlowMo = maximumHighSpeedFps >= 480 || isGalaxyS10e
         val supportsSlowMo = maximumHighSpeedFps >= 120 || isGalaxyS10e
 
-        if (!supportsPortrait) {
-            primaryModes.remove("Portrait")
-            moreModes.remove("Portrait")
-            if (activeMode == "Portrait") activeMode = "Photo"
-            if (activePrimaryMode == "Portrait") activePrimaryMode = "Photo"
-        }
         if (!supportsSuperSlowMo) {
             primaryModes.remove("Super Slow-Mo")
             moreModes.remove("Super Slow-Mo")
@@ -1100,15 +1092,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         primaryModes.remove("Pro Video")
         moreModes.remove("Pro")
         primaryModes.remove("Pro")
-        val availableBaseModes = buildList {
-            if (supportsPortrait) add("Portrait")
-            addAll(
-                listOf(
-                    "Photo", "Video", "Night", "Single Take", "Food",
-                    "Panorama", "Hyperlapse", "Portrait Video"
-                )
-            )
-        }
+        val availableBaseModes = listOf(
+            "Portrait", "Photo", "Video", "Night", "Single Take",
+            "Food", "Panorama", "Hyperlapse", "Portrait Video"
+        )
         availableBaseModes.forEach { mode ->
             if (mode !in primaryModes && mode !in moreModes) moreModes.add(mode)
         }
@@ -1137,6 +1124,77 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (activePrimaryMode !in primaryModes) activePrimaryMode = "More"
         saveCameraModeConfiguration()
         if (::modeRow.isInitialized) rebuildModeStrip()
+    }
+
+    private fun detectRearPortraitCameraSupport(
+        openedCameraId: String
+    ): PortraitCameraSupport {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return PortraitCameraSupport(
+                available = false,
+                reason = "Camera2 physical camera IDs require Android 9 or newer."
+            )
+        }
+
+        return try {
+            val characteristics = cameraManager.getCameraCharacteristics(openedCameraId)
+            if (characteristics.get(CameraCharacteristics.LENS_FACING) !=
+                CameraCharacteristics.LENS_FACING_BACK
+            ) {
+                return PortraitCameraSupport(
+                    available = false,
+                    reason = "The active camera is not rear-facing."
+                )
+            }
+
+            val capabilities = characteristics.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+            ) ?: intArrayOf()
+            val isLogicalMultiCamera = capabilities.contains(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+            )
+            val physicalIds = if (isLogicalMultiCamera) {
+                characteristics.physicalCameraIds.toList().distinct()
+            } else {
+                emptyList()
+            }
+            val rearCameraIds = cameraManager.cameraIdList.filter { id ->
+                cameraManager.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+            }.distinct()
+
+            val multipleRearCameras = physicalIds.size >= 2 || rearCameraIds.size >= 2
+            PortraitCameraSupport(
+                available = multipleRearCameras,
+                route = when {
+                    physicalIds.size >= 2 -> "logical-physical"
+                    rearCameraIds.size >= 2 -> "separate-camera-ids"
+                    else -> null
+                },
+                logicalCameraId = openedCameraId.takeIf { isLogicalMultiCamera },
+                physicalCameraIds = physicalIds,
+                concurrentCameraIds = rearCameraIds,
+                reason = when {
+                    physicalIds.size >= 2 ->
+                        "Multiple physical rear cameras are exposed by the logical camera."
+                    rearCameraIds.size >= 2 ->
+                        "Multiple rear-facing camera IDs are exposed."
+                    else ->
+                        "Only one rear camera is exposed through Camera2."
+                }
+            )
+        } catch (e: CameraAccessException) {
+            PortraitCameraSupport(
+                available = false,
+                reason = "Camera capability query failed: ${e.reason}"
+            )
+        } catch (e: RuntimeException) {
+            PortraitCameraSupport(
+                available = false,
+                reason = "Camera capability query failed: ${e.message ?: "unknown error"}"
+            )
+        }
     }
 
     private fun detectRearPortraitCameraSupport(
@@ -1355,17 +1413,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun selectMode(mode: String) {
-        if (mode == "Portrait" &&
-            (lensFacing != CameraCharacteristics.LENS_FACING_BACK ||
-                !rearPortraitCameraSupport.available)
-        ) {
-            Toast.makeText(
-                this,
-                "Portrait requires two rear cameras that can stream simultaneously.",
-                Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
         if (mode == "More") {
             activePrimaryMode = "More"
             updatePrimaryModeLabels()
@@ -1382,7 +1429,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             Toast.makeText(this, "Pro mode is not implemented yet.", Toast.LENGTH_SHORT).show()
             return
         }
-        if (mode != "Photo") {
+        if (mode != "Photo" && mode != "Portrait") {
             Toast.makeText(this, "$mode mode is not implemented yet.", Toast.LENGTH_SHORT).show()
         }
     }
@@ -1752,22 +1799,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             setModeDropTarget(tile, group, mode)
         } else {
             tile.setOnClickListener {
-                if (mode == "Portrait" &&
-                    (lensFacing != CameraCharacteristics.LENS_FACING_BACK ||
-                        !rearPortraitCameraSupport.available)
-                ) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Portrait requires two rear cameras that can stream simultaneously.",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    return@setOnClickListener
-                }
                 activeMode = mode
                 activePrimaryMode = if (mode in primaryModes) mode else "More"
                 closeMoreModes()
                 updatePrimaryModeLabels()
-                if (mode != "Photo") {
+                if (mode != "Photo" && mode != "Portrait") {
                     Toast.makeText(
                         this@MainActivity,
                         "$mode mode is not implemented in this build yet.",
@@ -2115,7 +2151,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun onShutterPressed() {
-        if (activeTab != "Basic" || activeMode != "Photo") return
+        if (activeTab != "Basic" || activeMode !in listOf("Photo", "Portrait")) return
         if (capturePending) return
         val delay = timerSeconds
         if (delay > 0) {
