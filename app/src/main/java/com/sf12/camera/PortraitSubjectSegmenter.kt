@@ -64,9 +64,11 @@ internal class PortraitSubjectSegmenter {
             Utils.bitmapToMat(bitmap, rgba)
             Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
 
-            val initialLabels = ByteArray(width * height) {
-                Imgproc.GC_PR_BGD.toByte()
-            }
+            // Build GrabCut's initial labels with native OpenCV drawing operations.
+            // The previous per-pixel Kotlin loops dominated setup time on large images.
+            labels.create(height, width, CvType.CV_8UC1)
+            labels.setTo(Scalar(Imgproc.GC_PR_BGD.toDouble()))
+
             // Keep a generous probable-foreground region around each tap.
             // GrabCut refines the boundary from image colour and texture; the tap
             // should guide it, not impose a tight crop around the selected pixel.
@@ -75,69 +77,74 @@ internal class PortraitSubjectSegmenter {
                 val heightFraction = if (index == 0) 0.58f else 0.42f
                 max(12f, width * widthFraction) to max(12f, height * heightFraction)
             }
-
-            for (y in 0 until height) {
-                val row = y * width
-                for (x in 0 until width) {
-                    var insideSelection = false
-                    for (index in pointList.indices) {
-                        val point = pointList[index]
-                        val radius = radii[index]
-                        val dx = (x - point.first) / radius.first
-                        val dy = (y - point.second) / radius.second
-                        if (dx * dx + dy * dy <= 1f) {
-                            insideSelection = true
-                            break
-                        }
-                    }
-                    if (insideSelection) {
-                        initialLabels[row + x] = Imgproc.GC_PR_FGD.toByte()
-                    }
-                }
+            pointList.forEachIndexed { index, point ->
+                val radius = radii[index]
+                Imgproc.ellipse(
+                    labels,
+                    org.opencv.core.Point(point.first.toDouble(), point.second.toDouble()),
+                    Size(radius.first.toDouble(), radius.second.toDouble()),
+                    0.0,
+                    0.0,
+                    360.0,
+                    Scalar(Imgproc.GC_PR_FGD.toDouble()),
+                    -1
+                )
             }
 
             // A firm background border gives GrabCut background samples even when
             // the selected subject is large or touches the probable-foreground area.
             val border = max(5, min(width, height) / 90)
-            for (y in 0 until height) {
-                val row = y * width
-                for (x in 0 until width) {
-                    if (x < border || y < border ||
-                        x >= width - border || y >= height - border
-                    ) {
-                        initialLabels[row + x] = Imgproc.GC_BGD.toByte()
-                    }
-                }
-            }
+            val background = Scalar(Imgproc.GC_BGD.toDouble())
+            Imgproc.rectangle(
+                labels,
+                org.opencv.core.Point(0.0, 0.0),
+                org.opencv.core.Point((width - 1).toDouble(), (border - 1).toDouble()),
+                background,
+                -1
+            )
+            Imgproc.rectangle(
+                labels,
+                org.opencv.core.Point(0.0, (height - border).toDouble()),
+                org.opencv.core.Point((width - 1).toDouble(), (height - 1).toDouble()),
+                background,
+                -1
+            )
+            Imgproc.rectangle(
+                labels,
+                org.opencv.core.Point(0.0, border.toDouble()),
+                org.opencv.core.Point((border - 1).toDouble(), (height - border - 1).toDouble()),
+                background,
+                -1
+            )
+            Imgproc.rectangle(
+                labels,
+                org.opencv.core.Point((width - border).toDouble(), border.toDouble()),
+                org.opencv.core.Point((width - 1).toDouble(), (height - border - 1).toDouble()),
+                background,
+                -1
+            )
 
             // Each tap contributes a hard foreground seed so separately selected
             // objects can remain sharp in the same photograph.
+            val seedRadius = max(4, min(width, height) / 28)
             pointList.forEach { point ->
-                val radius = max(4, min(width, height) / 28)
-                val centreX = point.first.toInt()
-                val centreY = point.second.toInt()
-                val radiusSquared = radius * radius
-                for (y in max(border, centreY - radius)..min(height - border - 1, centreY + radius)) {
-                    val row = y * width
-                    for (x in max(border, centreX - radius)..min(width - border - 1, centreX + radius)) {
-                        val dx = x - centreX
-                        val dy = y - centreY
-                        if (dx * dx + dy * dy <= radiusSquared) {
-                            initialLabels[row + x] = Imgproc.GC_FGD.toByte()
-                        }
-                    }
-                }
+                val centreX = point.first.toInt().coerceIn(border + seedRadius, width - border - seedRadius - 1)
+                val centreY = point.second.toInt().coerceIn(border + seedRadius, height - border - seedRadius - 1)
+                Imgproc.circle(
+                    labels,
+                    org.opencv.core.Point(centreX.toDouble(), centreY.toDouble()),
+                    seedRadius,
+                    Scalar(Imgproc.GC_FGD.toDouble()),
+                    -1
+                )
             }
-
-            labels.create(height, width, CvType.CV_8UC1)
-            labels.put(0, 0, initialLabels)
             Imgproc.grabCut(
                 bgr,
                 labels,
                 Rect(0, 0, width, height),
                 backgroundModel,
                 foregroundModel,
-                5,
+                2,
                 Imgproc.GC_INIT_WITH_MASK
             )
 
@@ -154,6 +161,34 @@ internal class PortraitSubjectSegmenter {
                 Core.CMP_EQ
             )
             Core.bitwise_or(sureForeground, probableForeground, binaryMask)
+            val initialForegroundRatio = Core.countNonZero(binaryMask).toFloat() /
+                (width * height).toFloat()
+            // Spend one extra native iteration only for unusually small or large
+            // selections, where the first mask is more likely to need refinement.
+            if (initialForegroundRatio < 0.015f || initialForegroundRatio > 0.88f) {
+                Imgproc.grabCut(
+                    bgr,
+                    labels,
+                    Rect(0, 0, width, height),
+                    backgroundModel,
+                    foregroundModel,
+                    1,
+                    Imgproc.GC_EVAL
+                )
+                Core.compare(
+                    labels,
+                    Scalar(Imgproc.GC_FGD.toDouble()),
+                    sureForeground,
+                    Core.CMP_EQ
+                )
+                Core.compare(
+                    labels,
+                    Scalar(Imgproc.GC_PR_FGD.toDouble()),
+                    probableForeground,
+                    Core.CMP_EQ
+                )
+                Core.bitwise_or(sureForeground, probableForeground, binaryMask)
+            }
             Imgproc.dilate(binaryMask, expandedMask, kernel)
             Imgproc.GaussianBlur(
                 expandedMask,
