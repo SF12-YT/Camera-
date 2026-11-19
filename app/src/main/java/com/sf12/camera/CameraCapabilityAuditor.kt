@@ -7,7 +7,7 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
-import android.media.ImageFormat
+import android.graphics.ImageFormat
 import android.media.ImageReader
 import android.os.Build
 import android.util.Size
