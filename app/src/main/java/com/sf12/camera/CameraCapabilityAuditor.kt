@@ -241,6 +241,60 @@ internal class CameraCapabilityAuditor(
             } else {
                 lines += "Preview + JPEG + YUV + DEPTH16: NOT TESTED (one or both outputs unavailable)"
             }
+
+            val logicalCapabilities = activeCharacteristics?.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+            ) ?: intArrayOf()
+            val physicalIds = if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                logicalCapabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
+            ) {
+                try {
+                    activeCharacteristics?.physicalCameraIds?.toList().orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                lines += "Two-physical-camera stream test: NOT TESTED (requires Android 9+)"
+            } else if (physicalIds.size < 2 || activeCharacteristics == null) {
+                lines += "Two-physical-camera stream test: NOT TESTED (active camera does not expose a logical physical-camera pair)"
+            } else {
+                val candidates = physicalIds.mapNotNull { physicalId ->
+                    try {
+                        val physical = activeCharacteristics.getPhysicalCameraCharacteristics(physicalId)
+                        val physicalMap = physical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                        val sizes = outputSizes(physicalMap, ImageFormat.YUV_420_888)
+                        val size = pickProbeSize(sizes, 1280, 720) ?: return@mapNotNull null
+                        val focal = physical.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                            ?.minOrNull() ?: Float.NaN
+                        Triple(physicalId, size, focal)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }.sortedBy { if (it.third.isNaN()) Float.MAX_VALUE else it.third }
+
+                if (candidates.size >= 2) {
+                    val first = candidates.first()
+                    val second = candidates.last()
+                    lines += "Physical YUV streams selected: ${first.first} @ ${first.second} + ${second.first} @ ${second.second}"
+                    lines += probeLine(
+                        "Preview + JPEG + two physical YUV streams",
+                        probePhysicalPairSession(
+                            activeDevice,
+                            baseSurfaces,
+                            first.first,
+                            first.second,
+                            second.first,
+                            second.second
+                        )
+                    )
+                } else {
+                    lines += "Two-physical-camera stream test: NOT TESTED (fewer than two physical cameras expose YUV_420_888 outputs)"
+                }
+            }
         }
 
         lines += ""
@@ -286,6 +340,65 @@ internal class CameraCapabilityAuditor(
                 extraSurfaces += reader.surface
             }
             val outputs = (baseSurfaces + extraSurfaces).map(::OutputConfiguration)
+            val sessionConfig = SessionConfiguration(
+                SessionConfiguration.SESSION_REGULAR,
+                outputs,
+                directExecutor,
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) = session.close()
+                    override fun onConfigureFailed(session: CameraCaptureSession) = session.close()
+                }
+            )
+            ProbeResult(device.isSessionConfigurationSupported(sessionConfig))
+        } catch (error: Exception) {
+            ProbeResult(null, error.message ?: error.javaClass.simpleName)
+        } finally {
+            readers.forEach {
+                try {
+                    it.close()
+                } catch (_: Exception) {
+                    // Diagnostic cleanup only.
+                }
+            }
+        }
+    }
+
+    private fun probePhysicalPairSession(
+        device: CameraDevice,
+        baseSurfaces: List<Surface>,
+        firstCameraId: String,
+        firstSize: Size,
+        secondCameraId: String,
+        secondSize: Size
+    ): ProbeResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return ProbeResult(null, "requires Android 9+")
+        }
+        val readers = mutableListOf<ImageReader>()
+        return try {
+            val firstReader = ImageReader.newInstance(
+                firstSize.width,
+                firstSize.height,
+                ImageFormat.YUV_420_888,
+                1
+            )
+            readers += firstReader
+            val secondReader = ImageReader.newInstance(
+                secondSize.width,
+                secondSize.height,
+                ImageFormat.YUV_420_888,
+                1
+            )
+            readers += secondReader
+
+            val firstOutput = OutputConfiguration(firstReader.surface).apply {
+                setPhysicalCameraId(firstCameraId)
+            }
+            val secondOutput = OutputConfiguration(secondReader.surface).apply {
+                setPhysicalCameraId(secondCameraId)
+            }
+            val outputs = baseSurfaces.map(::OutputConfiguration) +
+                listOf(firstOutput, secondOutput)
             val sessionConfig = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
                 outputs,
