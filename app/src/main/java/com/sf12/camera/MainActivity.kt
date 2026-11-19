@@ -3093,19 +3093,45 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     portraitProcessing = true
                     Toast.makeText(
                         this@MainActivity,
-                        "JPEG received. Processing portrait…",
+                        "JPEG received. Saving original first…",
                         Toast.LENGTH_SHORT
                     ).show()
                     Thread({
+                        var savedUri: Uri? = null
                         try {
-                            saveJpeg(createPortraitJpeg(bytes, ticket.focusPoints, ticket.rotation))
-                        } catch (error: Throwable) {
-                            val detail = "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
-                            saveJpeg(bytes)
+                            // Never hold the only copy of a capture in RAM while
+                            // running expensive segmentation. Publish the original
+                            // immediately, then replace its contents after processing.
+                            savedUri = saveJpeg(bytes)
+                            if (savedUri == null) return@Thread
                             runOnUiThread {
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Portrait effect failed ($detail). Original photo saved.",
+                                    "Original saved. Applying Portrait effect…",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+
+                            val portraitBytes = createPortraitJpeg(
+                                bytes,
+                                ticket.focusPoints,
+                                ticket.rotation
+                            )
+                            replaceSavedJpeg(savedUri, portraitBytes)
+                            runOnUiThread {
+                                showGalleryThumbnail(savedUri!!)
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Portrait effect applied.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        } catch (error: Throwable) {
+                            val detail = "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
+                            runOnUiThread {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Portrait processing failed ($detail). Original photo was kept.",
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
@@ -3407,7 +3433,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun saveJpeg(bytes: ByteArray) {
+    private fun saveJpeg(bytes: ByteArray): Uri? {
         val storage = selectedCameraStorageLocation()
         if (storage == null) {
             runOnUiThread {
@@ -3417,10 +3443,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     Toast.LENGTH_LONG
                 ).show()
             }
-            return
+            return null
         }
 
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(storage.volumeName)
         } else {
@@ -3461,12 +3487,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     Toast.LENGTH_SHORT
                 ).show()
             }
-        } catch (e: Exception) {
+            return uri
+        } catch (e: Throwable) {
             savedUri?.let { contentResolver.delete(it, null, null) }
             runOnUiThread {
-                Toast.makeText(this, "Couldn't save photo: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "Couldn't save photo: ${e.message ?: e.javaClass.simpleName}",
+                    Toast.LENGTH_LONG
+                ).show()
             }
+            return null
         }
+    }
+
+    private fun replaceSavedJpeg(uri: Uri, bytes: ByteArray) {
+        contentResolver.openOutputStream(uri, "wt")?.use { output ->
+            output.write(bytes)
+            output.flush()
+        } ?: throw IllegalStateException("Unable to reopen the saved photo for Portrait processing")
     }
 
     private fun closeCamera() {
