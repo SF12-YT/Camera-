@@ -2274,57 +2274,52 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 smallHeight,
                 14
             )
-            val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            try {
-                // Composite one scanline at a time. Keeping full-frame source and
-                // destination IntArrays alongside two full-resolution Bitmaps
-                // needlessly multiplies peak heap use on high-resolution captures.
-                val originalRow = IntArray(width)
-                val outputRow = IntArray(width)
+            // Composite in-place on the oriented capture. The source JPEG remains
+            // available as the fallback, so we do not need a second full-size
+            // destination Bitmap (about 48 MB at 12 MP).
+            val originalRow = IntArray(width)
+            val outputRow = IntArray(width)
 
-                for (y in 0 until height) {
-                    oriented.getPixels(originalRow, 0, width, 0, y, width, 1)
-                    val sampleY = ((y.toLong() * smallHeight) / height)
-                        .toInt().coerceIn(0, smallHeight - 1)
-                    val maskRow = sampleY * smallWidth
-                    val blurRow = sampleY * smallWidth
+            for (y in 0 until height) {
+                oriented.getPixels(originalRow, 0, width, 0, y, width, 1)
+                val sampleY = ((y.toLong() * smallHeight) / height)
+                    .toInt().coerceIn(0, smallHeight - 1)
+                val maskRow = sampleY * smallWidth
+                val blurRow = sampleY * smallWidth
 
-                    for (x in 0 until width) {
-                        val sampleX = ((x.toLong() * smallWidth) / width)
-                            .toInt().coerceIn(0, smallWidth - 1)
-                        val subjectAlpha =
-                            segmentation.alpha[maskRow + sampleX].toInt() and 0xFF
-                        var blurAmount = 1f - subjectAlpha / 255f
-                        blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
+                for (x in 0 until width) {
+                    val sampleX = ((x.toLong() * smallWidth) / width)
+                        .toInt().coerceIn(0, smallWidth - 1)
+                    val subjectAlpha =
+                        segmentation.alpha[maskRow + sampleX].toInt() and 0xFF
+                    var blurAmount = 1f - subjectAlpha / 255f
+                    blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
 
-                        val original = originalRow[x]
-                        if (blurAmount <= 0.002f) {
-                            outputRow[x] = original
-                        } else {
-                            val blurred = blurredPixels[blurRow + sampleX]
-                            val sharpWeight = 1f - blurAmount
-                            val red = ((((original shr 16) and 0xFF) * sharpWeight) +
-                                (((blurred shr 16) and 0xFF) * blurAmount)).toInt()
-                            val green = ((((original shr 8) and 0xFF) * sharpWeight) +
-                                (((blurred shr 8) and 0xFF) * blurAmount)).toInt()
-                            val blue = (((original and 0xFF) * sharpWeight) +
-                                ((blurred and 0xFF) * blurAmount)).toInt()
-                            outputRow[x] = (0xFF shl 24) or
-                                (red.coerceIn(0, 255) shl 16) or
-                                (green.coerceIn(0, 255) shl 8) or
-                                blue.coerceIn(0, 255)
-                        }
+                    val original = originalRow[x]
+                    if (blurAmount <= 0.002f) {
+                        outputRow[x] = original
+                    } else {
+                        val blurred = blurredPixels[blurRow + sampleX]
+                        val sharpWeight = 1f - blurAmount
+                        val red = ((((original shr 16) and 0xFF) * sharpWeight) +
+                            (((blurred shr 16) and 0xFF) * blurAmount)).toInt()
+                        val green = ((((original shr 8) and 0xFF) * sharpWeight) +
+                            (((blurred shr 8) and 0xFF) * blurAmount)).toInt()
+                        val blue = (((original and 0xFF) * sharpWeight) +
+                            ((blurred and 0xFF) * blurAmount)).toInt()
+                        outputRow[x] = (0xFF shl 24) or
+                            (red.coerceIn(0, 255) shl 16) or
+                            (green.coerceIn(0, 255) shl 8) or
+                            blue.coerceIn(0, 255)
                     }
-                    output.setPixels(outputRow, 0, width, 0, y, width, 1)
                 }
-
-                val stream = ByteArrayOutputStream()
-                val compressed = output.compress(Bitmap.CompressFormat.JPEG, 94, stream)
-                if (!compressed) throw IllegalStateException("Portrait JPEG encoding failed")
-                return stream.toByteArray()
-            } finally {
-                output.recycle()
+                oriented.setPixels(outputRow, 0, width, 0, y, width, 1)
             }
+
+            val stream = ByteArrayOutputStream()
+            val compressed = oriented.compress(Bitmap.CompressFormat.JPEG, 94, stream)
+            if (!compressed) throw IllegalStateException("Portrait JPEG encoding failed")
+            return stream.toByteArray()
         } finally {
             oriented.recycle()
         }
@@ -2998,12 +2993,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     Thread({
                         try {
                             saveJpeg(createPortraitJpeg(bytes, focusPoints, rotation))
-                        } catch (error: Exception) {
+                        } catch (error: Throwable) {
+                            // Catch native-library linkage errors and allocation
+                            // failures too; either must still leave the user with
+                            // the captured original rather than a missing photo.
+                            val detail = "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
                             saveJpeg(bytes)
                             runOnUiThread {
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Portrait effect failed; the original photo was saved.",
+                                    "Portrait effect failed ($detail). Original photo saved.",
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
