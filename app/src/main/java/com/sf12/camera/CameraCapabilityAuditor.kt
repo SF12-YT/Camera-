@@ -150,7 +150,10 @@ internal class CameraCapabilityAuditor(
                         if (physical != null) {
                             val focal = physical.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                                 ?.joinToString { "${"%.2f".format(java.util.Locale.US, it)}mm" }
+                            val poseRotation = physical.get(CameraCharacteristics.LENS_POSE_ROTATION)?.joinToString()
+                            val poseTranslation = physical.get(CameraCharacteristics.LENS_POSE_TRANSLATION)?.joinToString()
                             lines += "    Physical $physicalId: focal lengths=${focal ?: "unknown"}, pixel array=${physical.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
+                            lines += "      Lens pose rotation=${poseRotation ?: "unavailable"}, translation=${poseTranslation ?: "unavailable"}"
                         }
                     }
                 }
@@ -168,10 +171,14 @@ internal class CameraCapabilityAuditor(
                 lines += "  DEPTH16 outputs: ${sizesSummary(depthSizes)}"
                 lines += "  RAW_SENSOR outputs: ${sizesSummary(rawSizes)}"
                 lines += "  DEPTH_OUTPUT capability: ${capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT)}"
-                val fpsRanges = streamMap?.highSpeedVideoFpsRanges
-                    ?.map { "${it.lower}-${it.upper}fps" }
-                    ?.distinct()
-                    .orEmpty()
+                val fpsRanges = try {
+                    streamMap?.highSpeedVideoFpsRanges
+                        ?.map { "${it.lower}-${it.upper}fps" }
+                        ?.distinct()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
                 lines += "  Constrained high-speed ranges: ${fpsRanges.joinToString().ifBlank { "none reported" }}"
             } catch (error: Exception) {
                 lines += "  Camera query failed: ${error.message ?: error.javaClass.simpleName}"
