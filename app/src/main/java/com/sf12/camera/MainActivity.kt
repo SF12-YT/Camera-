@@ -2188,7 +2188,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 override fun onCaptureFailed(
                     session: CameraCaptureSession,
                     request: CaptureRequest,
-                    failure: CameraCaptureSession.CaptureFailure
+                    failure: android.hardware.camera2.CaptureFailure
                 ) {
                     portraitCapturePending = false
                     runOnUiThread {
