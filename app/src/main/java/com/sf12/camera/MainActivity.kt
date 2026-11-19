@@ -1043,9 +1043,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
             addView(
                 reportText,
-                android.widget.ScrollView.LayoutParams(
-                    android.widget.ScrollView.LayoutParams.MATCH_PARENT,
-                    android.widget.ScrollView.LayoutParams.WRAP_CONTENT
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
                 )
             )
         }
