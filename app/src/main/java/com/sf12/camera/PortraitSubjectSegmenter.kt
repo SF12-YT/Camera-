@@ -67,9 +67,12 @@ internal class PortraitSubjectSegmenter {
             val initialLabels = ByteArray(width * height) {
                 Imgproc.GC_PR_BGD.toByte()
             }
+            // Keep a generous probable-foreground region around each tap.
+            // GrabCut refines the boundary from image colour and texture; the tap
+            // should guide it, not impose a tight crop around the selected pixel.
             val radii = pointList.mapIndexed { index, _ ->
-                val widthFraction = if (index == 0) 0.43f else 0.25f
-                val heightFraction = if (index == 0) 0.43f else 0.25f
+                val widthFraction = if (index == 0) 0.58f else 0.42f
+                val heightFraction = if (index == 0) 0.58f else 0.42f
                 max(12f, width * widthFraction) to max(12f, height * heightFraction)
             }
 
@@ -156,7 +159,7 @@ internal class PortraitSubjectSegmenter {
                 expandedMask,
                 softenedMask,
                 Size(0.0, 0.0),
-                2.0
+                5.0
             )
 
             val alpha = ByteArray(width * height)
