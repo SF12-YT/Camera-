@@ -2138,14 +2138,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun captureStillPhoto() {
         capturePending = false
-        val device = cameraDevice ?: return
-        val session = captureSession ?: return
-        val reader = imageReader ?: return
+        val device = cameraDevice
+        val session = captureSession
+        val reader = imageReader
+        if (device == null || session == null || reader == null) {
+            portraitCapturePending = false
+            Toast.makeText(
+                this,
+                "Camera is still preparing. Try again in a moment.",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
         val portraitCapture = activeMode == "Portrait"
         val rotation = jpegOrientation()
         portraitCapturePending = portraitCapture
         portraitCaptureRotation = rotation
-        portraitCaptureFocusPoints = portraitFocusPoints.ifEmpty { listOf(portraitFocusX to portraitFocusY) }
+        portraitCaptureFocusPoints = portraitFocusPoints.ifEmpty {
+            listOf(portraitFocusX to portraitFocusY)
+        }
+        if (portraitCapture) {
+            Toast.makeText(this, "Capturing portrait…", Toast.LENGTH_SHORT).show()
+        }
+
         try {
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
@@ -2168,10 +2184,39 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 ) {
                     startPreviewRepeating()
                 }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CameraCaptureSession.CaptureFailure
+                ) {
+                    portraitCapturePending = false
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Capture failed (reason ${failure.reason}). Try again.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    startPreviewRepeating()
+                }
+
+                override fun onCaptureSequenceAborted(
+                    session: CameraCaptureSession,
+                    sequenceId: Int
+                ) {
+                    portraitCapturePending = false
+                    startPreviewRepeating()
+                }
             }, cameraHandler)
-        } catch (e: CameraAccessException) {
+        } catch (e: Exception) {
             portraitCapturePending = false
-            Toast.makeText(this, "Capture failed: ${e.reason}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Capture failed: ${e.message ?: e.javaClass.simpleName}",
+                Toast.LENGTH_LONG
+            ).show()
+            startPreviewRepeating()
         }
     }
 
@@ -2907,7 +2952,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             2
         ).also { reader ->
             reader.setOnImageAvailableListener({ source ->
-                val image = source.acquireNextImage() ?: return@setOnImageAvailableListener
+                val image = try {
+                    source.acquireNextImage()
+                } catch (error: Exception) {
+                    portraitCapturePending = false
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Couldn't receive the captured image: ${error.message ?: error.javaClass.simpleName}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@setOnImageAvailableListener
+                } ?: return@setOnImageAvailableListener
+
                 val bytes = try {
                     val buffer: ByteBuffer = image.planes[0].buffer
                     ByteArray(buffer.remaining()).also { buffer.get(it) }
@@ -2919,6 +2977,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val focusPoints = portraitCaptureFocusPoints
                 portraitCapturePending = false
                 if (applyPortrait) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Processing portrait…",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                     Thread({
                         try {
                             saveJpeg(createPortraitJpeg(bytes, focusPoints, rotation))
@@ -2927,7 +2992,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             runOnUiThread {
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Portrait processing failed; saved the original photo.",
+                                    "Portrait effect failed; the original photo was saved.",
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
