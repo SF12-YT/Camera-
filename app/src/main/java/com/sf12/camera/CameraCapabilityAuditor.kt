@@ -144,7 +144,7 @@ internal class CameraCapabilityAuditor(
                     }}"
                     physicalIds.forEach { physicalId ->
                         val physical = try {
-                            characteristics.getPhysicalCameraCharacteristics(physicalId)
+                            cameraManager.getCameraCharacteristics(physicalId)
                         } catch (_: Exception) {
                             null
                         }
@@ -271,7 +271,7 @@ internal class CameraCapabilityAuditor(
             } else {
                 val candidates = physicalIds.mapNotNull { physicalId ->
                     try {
-                        val physical = activeCharacteristics.getPhysicalCameraCharacteristics(physicalId)
+                        val physical = cameraManager.getCameraCharacteristics(physicalId)
                         val physicalMap = physical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                         val sizes = outputSizes(physicalMap, ImageFormat.YUV_420_888)
                         val size = pickProbeSize(sizes, 1280, 720) ?: return@mapNotNull null
