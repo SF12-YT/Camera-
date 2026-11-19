@@ -102,6 +102,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     @Volatile private var portraitCaptureRotation = 0
     @Volatile private var portraitFocusX = 0.5f
     @Volatile private var portraitFocusY = 0.42f
+    @Volatile private var portraitFocusPoints = emptyList<Pair<Float, Float>>()
+    @Volatile private var portraitCaptureFocusPoints = emptyList<Pair<Float, Float>>()
+    private var portraitHasUserSelection = false
     private var previewSize: Size? = null
     private var previewSurface: Surface? = null
     private var backgroundThread: HandlerThread? = null
@@ -629,6 +632,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     if (gestureHadMultiplePointers || event.pointerCount > 1) return false
                     focusAtPoint(event.x, event.y)
                     return true
+                }
+
+                override fun onLongPress(event: MotionEvent) {
+                    if (!gestureHadMultiplePointers && activeMode == "Portrait") {
+                        focusAtPoint(event.x, event.y, addPortraitSubject = true)
+                    }
                 }
 
                 override fun onFling(
@@ -2136,6 +2145,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val rotation = jpegOrientation()
         portraitCapturePending = portraitCapture
         portraitCaptureRotation = rotation
+        portraitCaptureFocusPoints = portraitFocusPoints.ifEmpty { listOf(portraitFocusX to portraitFocusY) }
         try {
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
@@ -2177,14 +2187,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     /**
-     * Produces a conventional, tap-centred portrait blur. The clear oval is
-     * deliberately manual: it avoids AI segmentation and remains available
-     * on single-camera devices, but it is not a depth-aware subject mask.
+     * Creates a subject-aware Portrait image using an offline, category-agnostic
+     * GrabCut mask. A normal tap selects one subject; a long press adds another.
      */
     private fun createPortraitJpeg(
         jpeg: ByteArray,
-        focusX: Float,
-        focusY: Float,
+        focusPoints: List<Pair<Float, Float>>,
         rotation: Int
     ): ByteArray {
         val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
@@ -2199,43 +2207,41 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val width = oriented.width
         val height = oriented.height
-        val scale = minOf(1f, 1400f / max(width, height).toFloat())
+        val scale = minOf(1f, 1200f / max(width, height).toFloat())
         val smallWidth = (width * scale).toInt().coerceAtLeast(1)
         val smallHeight = (height * scale).toInt().coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(oriented, smallWidth, smallHeight, true)
 
         val originalPixels = IntArray(width * height)
-        oriented.getPixels(originalPixels, 0, width, 0, 0, width, height)
         val smallPixels = IntArray(smallWidth * smallHeight)
-        small.getPixels(smallPixels, 0, smallWidth, 0, 0, smallWidth, smallHeight)
-        if (small !== oriented) small.recycle()
-        oriented.recycle()
+        val segmentation = try {
+            oriented.getPixels(originalPixels, 0, width, 0, 0, width, height)
+            small.getPixels(smallPixels, 0, smallWidth, 0, 0, smallWidth, smallHeight)
+            PortraitSubjectSegmenter().createMask(small, focusPoints)
+        } finally {
+            if (small !== oriented) small.recycle()
+            oriented.recycle()
+        }
 
         val blurredPixels = blurArgbPixels(
             smallPixels,
             smallWidth,
             smallHeight,
-            12
+            14
         )
         val outputPixels = IntArray(originalPixels.size)
-        val centreX = focusX.coerceIn(0f, 1f) * width
-        val centreY = focusY.coerceIn(0f, 1f) * height
-        val radiusX = (width * 0.40f).coerceAtLeast(1f)
-        val radiusY = (height * 0.46f).coerceAtLeast(1f)
-        val transitionStart = 0.58f
-        val transitionEnd = 1.55f
 
         for (y in 0 until height) {
-            val dy = (y + 0.5f - centreY) / radiusY
             val sampleY = ((y.toLong() * smallHeight) / height)
                 .toInt().coerceIn(0, smallHeight - 1)
             val outputRow = y * width
+            val maskRow = sampleY * smallWidth
             val blurRow = sampleY * smallWidth
             for (x in 0 until width) {
-                val dx = (x + 0.5f - centreX) / radiusX
-                val distanceSquared = dx * dx + dy * dy
-                var blurAmount = ((distanceSquared - transitionStart) /
-                    (transitionEnd - transitionStart)).coerceIn(0f, 1f)
+                val sampleX = ((x.toLong() * smallWidth) / width)
+                    .toInt().coerceIn(0, smallWidth - 1)
+                val subjectAlpha = segmentation.alpha[maskRow + sampleX].toInt() and 0xFF
+                var blurAmount = 1f - subjectAlpha / 255f
                 blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
 
                 val index = outputRow + x
@@ -2243,8 +2249,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (blurAmount <= 0.002f) {
                     outputPixels[index] = original
                 } else {
-                    val sampleX = ((x.toLong() * smallWidth) / width)
-                        .toInt().coerceIn(0, smallWidth - 1)
                     val blurred = blurredPixels[blurRow + sampleX]
                     val sharpWeight = 1f - blurAmount
                     val red = ((((original shr 16) and 0xFF) * sharpWeight) +
@@ -2912,13 +2916,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
                 val applyPortrait = portraitCapturePending
                 val rotation = portraitCaptureRotation
-                val focusX = portraitFocusX
-                val focusY = portraitFocusY
+                val focusPoints = portraitCaptureFocusPoints
                 portraitCapturePending = false
                 if (applyPortrait) {
                     Thread({
                         try {
-                            saveJpeg(createPortraitJpeg(bytes, focusX, focusY, rotation))
+                            saveJpeg(createPortraitJpeg(bytes, focusPoints, rotation))
                         } catch (error: Exception) {
                             saveJpeg(bytes)
                             runOnUiThread {
@@ -3091,7 +3094,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         mainHandler.postDelayed(hideFocusIndicatorRunnable, 1_000L)
     }
 
-    private fun focusAtPoint(viewX: Float, viewY: Float) {
+    private fun focusAtPoint(
+        viewX: Float,
+        viewY: Float,
+        addPortraitSubject: Boolean = false
+    ) {
         val characteristics = cameraCharacteristics ?: return
         val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             ?: return
@@ -3140,6 +3147,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
         portraitFocusX = displayX
         portraitFocusY = displayY
+        if (activeMode == "Portrait") {
+            val selectedPoint = displayX to displayY
+            portraitFocusPoints = if (addPortraitSubject && portraitHasUserSelection) {
+                (portraitFocusPoints + selectedPoint).distinct().take(5)
+            } else {
+                listOf(selectedPoint)
+            }
+            portraitHasUserSelection = true
+            if (addPortraitSubject) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Additional subject selected",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
         showFocusIndicator(viewX, viewY)
 
         val session = captureSession ?: return
