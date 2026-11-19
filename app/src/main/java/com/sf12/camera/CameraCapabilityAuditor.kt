@@ -13,7 +13,6 @@ import android.os.Build
 import android.util.Size
 import android.view.Surface
 import java.util.concurrent.Executor
-import kotlin.math.max
 
 /**
  * Produces an on-device Camera2 hardware and stream report.
@@ -85,7 +84,7 @@ internal class CameraCapabilityAuditor(
         }
         lines += ""
 
-        ids.forEachIndexed { index, id ->
+        ids.forEach { id ->
             lines += "CAMERA $id${if (id == activeCameraId) " (ACTIVE)" else ""}"
             try {
                 val characteristics = cameraManager.getCameraCharacteristics(id)
@@ -160,7 +159,7 @@ internal class CameraCapabilityAuditor(
                 lines += "  Active array: ${characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.toShortString() ?: "unknown"}"
                 lines += "  Focal lengths: ${characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString { "${"%.2f".format(java.util.Locale.US, it)}mm" } ?: "unknown"}"
                 lines += "  Minimum focus distance: ${characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: "unknown"} dioptres"
-                lines += "  AF modes: ${characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.map(::afModeName)?.joinToString().ifBlank { "none reported" }}"
+                lines += "  AF modes: ${characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.map(::afModeName)?.joinToString().orEmpty().ifBlank { "none reported" }}"
                 lines += "  AF / AE metering regions: ${characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0} / ${characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0}"
                 lines += "  Flash: ${characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true}"
                 lines += "  JPEG outputs: ${sizesSummary(jpegSizes)}"
