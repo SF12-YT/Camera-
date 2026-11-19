@@ -26,5 +26,5 @@ android {
 }
 
 dependencies {
-    implementation("org.opencv:opencv:4.14.0")
+    implementation("org.opencv:opencv:4.12.0")
 }
