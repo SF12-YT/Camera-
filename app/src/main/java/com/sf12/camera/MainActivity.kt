@@ -2250,73 +2250,84 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             decoded
         }
 
-        val width = oriented.width
-        val height = oriented.height
-        val scale = minOf(1f, 1200f / max(width, height).toFloat())
-        val smallWidth = (width * scale).toInt().coerceAtLeast(1)
-        val smallHeight = (height * scale).toInt().coerceAtLeast(1)
-        val small = Bitmap.createScaledBitmap(oriented, smallWidth, smallHeight, true)
+        try {
+            val width = oriented.width
+            val height = oriented.height
+            val scale = minOf(1f, 1200f / max(width, height).toFloat())
+            val smallWidth = (width * scale).toInt().coerceAtLeast(1)
+            val smallHeight = (height * scale).toInt().coerceAtLeast(1)
+            val small = Bitmap.createScaledBitmap(oriented, smallWidth, smallHeight, true)
+            val smallPixels = IntArray(smallWidth * smallHeight)
 
-        val originalPixels = IntArray(width * height)
-        val smallPixels = IntArray(smallWidth * smallHeight)
-        val segmentation = try {
-            oriented.getPixels(originalPixels, 0, width, 0, 0, width, height)
-            small.getPixels(smallPixels, 0, smallWidth, 0, 0, smallWidth, smallHeight)
-            PortraitSubjectSegmenter().createMask(small, focusPoints)
+            val segmentation = try {
+                small.getPixels(
+                    smallPixels, 0, smallWidth, 0, 0, smallWidth, smallHeight
+                )
+                PortraitSubjectSegmenter().createMask(small, focusPoints)
+            } finally {
+                if (small !== oriented) small.recycle()
+            }
+
+            val blurredPixels = blurArgbPixels(
+                smallPixels,
+                smallWidth,
+                smallHeight,
+                14
+            )
+            val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            try {
+                // Composite one scanline at a time. Keeping full-frame source and
+                // destination IntArrays alongside two full-resolution Bitmaps
+                // needlessly multiplies peak heap use on high-resolution captures.
+                val originalRow = IntArray(width)
+                val outputRow = IntArray(width)
+
+                for (y in 0 until height) {
+                    oriented.getPixels(originalRow, 0, width, 0, y, width, 1)
+                    val sampleY = ((y.toLong() * smallHeight) / height)
+                        .toInt().coerceIn(0, smallHeight - 1)
+                    val maskRow = sampleY * smallWidth
+                    val blurRow = sampleY * smallWidth
+
+                    for (x in 0 until width) {
+                        val sampleX = ((x.toLong() * smallWidth) / width)
+                            .toInt().coerceIn(0, smallWidth - 1)
+                        val subjectAlpha =
+                            segmentation.alpha[maskRow + sampleX].toInt() and 0xFF
+                        var blurAmount = 1f - subjectAlpha / 255f
+                        blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
+
+                        val original = originalRow[x]
+                        if (blurAmount <= 0.002f) {
+                            outputRow[x] = original
+                        } else {
+                            val blurred = blurredPixels[blurRow + sampleX]
+                            val sharpWeight = 1f - blurAmount
+                            val red = ((((original shr 16) and 0xFF) * sharpWeight) +
+                                (((blurred shr 16) and 0xFF) * blurAmount)).toInt()
+                            val green = ((((original shr 8) and 0xFF) * sharpWeight) +
+                                (((blurred shr 8) and 0xFF) * blurAmount)).toInt()
+                            val blue = (((original and 0xFF) * sharpWeight) +
+                                ((blurred and 0xFF) * blurAmount)).toInt()
+                            outputRow[x] = (0xFF shl 24) or
+                                (red.coerceIn(0, 255) shl 16) or
+                                (green.coerceIn(0, 255) shl 8) or
+                                blue.coerceIn(0, 255)
+                        }
+                    }
+                    output.setPixels(outputRow, 0, width, 0, y, width, 1)
+                }
+
+                val stream = ByteArrayOutputStream()
+                val compressed = output.compress(Bitmap.CompressFormat.JPEG, 94, stream)
+                if (!compressed) throw IllegalStateException("Portrait JPEG encoding failed")
+                return stream.toByteArray()
+            } finally {
+                output.recycle()
+            }
         } finally {
-            if (small !== oriented) small.recycle()
             oriented.recycle()
         }
-
-        val blurredPixels = blurArgbPixels(
-            smallPixels,
-            smallWidth,
-            smallHeight,
-            14
-        )
-        val outputPixels = IntArray(originalPixels.size)
-
-        for (y in 0 until height) {
-            val sampleY = ((y.toLong() * smallHeight) / height)
-                .toInt().coerceIn(0, smallHeight - 1)
-            val outputRow = y * width
-            val maskRow = sampleY * smallWidth
-            val blurRow = sampleY * smallWidth
-            for (x in 0 until width) {
-                val sampleX = ((x.toLong() * smallWidth) / width)
-                    .toInt().coerceIn(0, smallWidth - 1)
-                val subjectAlpha = segmentation.alpha[maskRow + sampleX].toInt() and 0xFF
-                var blurAmount = 1f - subjectAlpha / 255f
-                blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
-
-                val index = outputRow + x
-                val original = originalPixels[index]
-                if (blurAmount <= 0.002f) {
-                    outputPixels[index] = original
-                } else {
-                    val blurred = blurredPixels[blurRow + sampleX]
-                    val sharpWeight = 1f - blurAmount
-                    val red = ((((original shr 16) and 0xFF) * sharpWeight) +
-                        (((blurred shr 16) and 0xFF) * blurAmount)).toInt()
-                    val green = ((((original shr 8) and 0xFF) * sharpWeight) +
-                        (((blurred shr 8) and 0xFF) * blurAmount)).toInt()
-                    val blue = (((original and 0xFF) * sharpWeight) +
-                        ((blurred and 0xFF) * blurAmount)).toInt()
-                    outputPixels[index] = (0xFF shl 24) or
-                        (red.coerceIn(0, 255) shl 16) or
-                        (green.coerceIn(0, 255) shl 8) or
-                        blue.coerceIn(0, 255)
-                }
-            }
-        }
-
-        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        output.setPixels(outputPixels, 0, width, 0, 0, width, height)
-        val stream = ByteArrayOutputStream()
-        val compressed = output.compress(Bitmap.CompressFormat.JPEG, 94, stream)
-        output.recycle()
-        if (!compressed) throw IllegalStateException("Portrait JPEG encoding failed")
-        return stream.toByteArray()
     }
 
     private fun blurArgbPixels(
