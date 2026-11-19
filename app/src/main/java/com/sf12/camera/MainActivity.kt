@@ -172,6 +172,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         "Portrait", "Photo", "Video", "Night", "Single Take", "Food",
         "Panorama", "Super Slow-Mo", "Slow-Mo", "Hyperlapse", "Portrait Video"
     )
+    @Volatile private var cameraCapabilityReport = "Open the camera preview to generate a hardware capability report."
     private var openingCamera = false
     private var capturePending = false
 
@@ -842,6 +843,51 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         content.addView(TextView(this).apply {
+            text = "DEVICE CAPABILITIES"
+            textSize = 11f
+            letterSpacing = 0.14f
+            setTextColor(0xFFFFD54F.toInt())
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            setPadding(dp(2), dp(22), 0, dp(10))
+        })
+        val capabilityCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = rounded(0xFF202020.toInt(), 13, 0xFF383838.toInt())
+            addView(TextView(this@MainActivity).apply {
+                text = "Camera hardware report"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.NORMAL
+                )
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "Inspect Camera2 IDs, physical cameras, depth outputs and tested stream combinations."
+                textSize = 12f
+                setTextColor(0xFFBDBDBD.toInt())
+                setPadding(0, dp(5), 0, dp(10))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "VIEW CAPABILITY REPORT"
+                textSize = 12f
+                letterSpacing = 0.05f
+                gravity = Gravity.CENTER
+                setTextColor(0xFFFFD54F.toInt())
+                background = rounded(0xFF302B1C.toInt(), 9, 0xFF70602A.toInt())
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { showCameraCapabilityReport() }
+            })
+        }
+        content.addView(capabilityCard)
+
+        content.addView(TextView(this).apply {
             text = "STORAGE"
             textSize = 11f
             letterSpacing = 0.14f
@@ -982,6 +1028,39 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
         settingsOverlay = overlay
+    }
+
+    private fun showCameraCapabilityReport() {
+        val reportText = TextView(this).apply {
+            text = cameraCapabilityReport
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.WHITE)
+            setTextIsSelectable(true)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val scroll = android.widget.ScrollView(this).apply {
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(
+                reportText,
+                android.widget.ScrollView.LayoutParams(
+                    android.widget.ScrollView.LayoutParams.MATCH_PARENT,
+                    android.widget.ScrollView.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Camera capability report")
+            .setView(scroll)
+            .setPositiveButton("Copy report") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(
+                    ClipData.newPlainText("Camera capability report", cameraCapabilityReport)
+                )
+                Toast.makeText(this, "Capability report copied.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun closeSettings() {
@@ -2875,6 +2954,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             captureSession = null
             previewSurface?.release()
             previewSurface = Surface(texture)
+            cameraCapabilityReport = try {
+                CameraCapabilityAuditor(cameraManager).createReport(
+                    activeCameraId = cameraId ?: "unknown",
+                    activeDevice = device,
+                    previewSurface = previewSurface,
+                    jpegSurface = reader.surface,
+                    previewSize = size,
+                    jpegSize = Size(reader.width, reader.height)
+                )
+            } catch (error: Exception) {
+                "Camera capability audit failed: ${error.message ?: error.javaClass.simpleName}"
+            }
             configurePreviewTransform(previewView.width, previewView.height)
             device.createCaptureSession(
                 listOf(previewSurface!!, reader.surface),
