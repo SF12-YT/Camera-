@@ -99,6 +99,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraId: String? = null
     private var focusMeteringRegion: MeteringRectangle? = null
     @Volatile private var portraitCapturePending = false
+    @Volatile private var portraitProcessing = false
+    private var portraitCaptureTimeoutRunnable: Runnable? = null
     @Volatile private var portraitCaptureRotation = 0
     @Volatile private var portraitFocusX = 0.5f
     @Volatile private var portraitFocusY = 0.42f
@@ -2138,6 +2140,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun captureStillPhoto() {
         capturePending = false
+        if (activeMode == "Portrait" && (portraitCapturePending || portraitProcessing)) {
+            Toast.makeText(
+                this,
+                "Portrait capture is still in progress. Please wait.",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
         val device = cameraDevice
         val session = captureSession
         val reader = imageReader
@@ -2159,6 +2169,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             listOf(portraitFocusX to portraitFocusY)
         }
         if (portraitCapture) {
+            cancelPortraitCaptureTimeout()
+            val timeout = Runnable {
+                if (portraitCapturePending) {
+                    portraitCapturePending = false
+                    portraitCaptureTimeoutRunnable = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Portrait capture timed out. No image was received; try again.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    startPreviewRepeating()
+                }
+            }
+            portraitCaptureTimeoutRunnable = timeout
+            mainHandler.postDelayed(timeout, 12_000L)
             Toast.makeText(this, "Capturing portrait…", Toast.LENGTH_SHORT).show()
         }
 
@@ -2191,6 +2216,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     failure: android.hardware.camera2.CaptureFailure
                 ) {
                     portraitCapturePending = false
+                    cancelPortraitCaptureTimeout()
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
@@ -2206,11 +2232,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     sequenceId: Int
                 ) {
                     portraitCapturePending = false
+                    cancelPortraitCaptureTimeout()
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Portrait capture was cancelled by the camera. Try again.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                     startPreviewRepeating()
                 }
             }, cameraHandler)
         } catch (e: Exception) {
             portraitCapturePending = false
+            cancelPortraitCaptureTimeout()
             Toast.makeText(
                 this,
                 "Capture failed: ${e.message ?: e.javaClass.simpleName}",
@@ -2218,6 +2253,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             ).show()
             startPreviewRepeating()
         }
+    }
+
+    private fun cancelPortraitCaptureTimeout() {
+        portraitCaptureTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        portraitCaptureTimeoutRunnable = null
     }
 
     private fun applyFocusRegions(builder: CaptureRequest.Builder) {
@@ -2290,10 +2330,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 for (x in 0 until width) {
                     val sampleX = ((x.toLong() * smallWidth) / width)
                         .toInt().coerceIn(0, smallWidth - 1)
-                    val subjectAlpha =
-                        segmentation.alpha[maskRow + sampleX].toInt() and 0xFF
-                    var blurAmount = 1f - subjectAlpha / 255f
-                    blurAmount = blurAmount * blurAmount * (3f - 2f * blurAmount)
+                    // Bilinear mask sampling preserves the feather after the
+                    // low-resolution segmentation mask is mapped to the full photo.
+                    val subjectAlpha = sampleMaskAlpha(
+                        segmentation.alpha,
+                        smallWidth,
+                        smallHeight,
+                        x,
+                        y,
+                        width,
+                        height
+                    )
+                    val blurAmount = (1f - subjectAlpha / 255f).coerceIn(0f, 1f)
 
                     val original = originalRow[x]
                     if (blurAmount <= 0.002f) {
@@ -2323,6 +2371,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         } finally {
             oriented.recycle()
         }
+    }
+
+    private fun sampleMaskAlpha(
+        mask: ByteArray,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        destinationX: Int,
+        destinationY: Int,
+        destinationWidth: Int,
+        destinationHeight: Int
+    ): Float {
+        val sourceX = (
+            (destinationX + 0.5f) * sourceWidth / destinationWidth - 0.5f
+        ).coerceIn(0f, (sourceWidth - 1).toFloat())
+        val sourceY = (
+            (destinationY + 0.5f) * sourceHeight / destinationHeight - 0.5f
+        ).coerceIn(0f, (sourceHeight - 1).toFloat())
+
+        val x0 = sourceX.toInt()
+        val y0 = sourceY.toInt()
+        val x1 = (x0 + 1).coerceAtMost(sourceWidth - 1)
+        val y1 = (y0 + 1).coerceAtMost(sourceHeight - 1)
+        val fx = sourceX - x0
+        val fy = sourceY - y0
+
+        fun alphaAt(x: Int, y: Int): Float =
+            (mask[y * sourceWidth + x].toInt() and 0xFF).toFloat()
+
+        val top = alphaAt(x0, y0) * (1f - fx) + alphaAt(x1, y0) * fx
+        val bottom = alphaAt(x0, y1) * (1f - fx) + alphaAt(x1, y1) * fx
+        return top * (1f - fy) + bottom * fy
     }
 
     private fun blurArgbPixels(
@@ -2962,6 +3041,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     source.acquireNextImage()
                 } catch (error: Exception) {
                     portraitCapturePending = false
+                    cancelPortraitCaptureTimeout()
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
@@ -2970,11 +3050,35 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         ).show()
                     }
                     return@setOnImageAvailableListener
-                } ?: return@setOnImageAvailableListener
+                } ?: run {
+                    if (portraitCapturePending) {
+                        portraitCapturePending = false
+                        cancelPortraitCaptureTimeout()
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "The camera returned no image. Try capturing again.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                    return@setOnImageAvailableListener
+                }
 
                 val bytes = try {
                     val buffer: ByteBuffer = image.planes[0].buffer
                     ByteArray(buffer.remaining()).also { buffer.get(it) }
+                } catch (error: Throwable) {
+                    portraitCapturePending = false
+                    cancelPortraitCaptureTimeout()
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Couldn't read the captured image: ${error.javaClass.simpleName}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@setOnImageAvailableListener
                 } finally {
                     image.close()
                 }
@@ -2983,6 +3087,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val focusPoints = portraitCaptureFocusPoints
                 portraitCapturePending = false
                 if (applyPortrait) {
+                    cancelPortraitCaptureTimeout()
+                    portraitProcessing = true
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
@@ -3006,6 +3112,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
+                        } finally {
+                            portraitProcessing = false
                         }
                     }, "PortraitImageProcessor").start()
                 } else {
