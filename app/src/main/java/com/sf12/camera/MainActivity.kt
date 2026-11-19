@@ -3097,13 +3097,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         Toast.LENGTH_SHORT
                     ).show()
                     Thread({
-                        var savedUri: Uri? = null
                         try {
                             // Never hold the only copy of a capture in RAM while
                             // running expensive segmentation. Publish the original
                             // immediately, then replace its contents after processing.
-                            savedUri = saveJpeg(bytes)
-                            if (savedUri == null) return@Thread
+                            val savedPhotoUri = saveJpeg(bytes) ?: return@Thread
                             runOnUiThread {
                                 Toast.makeText(
                                     this@MainActivity,
@@ -3117,9 +3115,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                                 ticket.focusPoints,
                                 ticket.rotation
                             )
-                            replaceSavedJpeg(savedUri, portraitBytes)
+                            replaceSavedJpeg(savedPhotoUri, portraitBytes)
                             runOnUiThread {
-                                showGalleryThumbnail(savedUri!!)
+                                showGalleryThumbnail(savedPhotoUri)
                                 Toast.makeText(
                                     this@MainActivity,
                                     "Portrait effect applied.",
