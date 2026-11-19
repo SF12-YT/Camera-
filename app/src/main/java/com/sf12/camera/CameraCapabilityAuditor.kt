@@ -156,12 +156,16 @@ internal class CameraCapabilityAuditor(
                             val intrinsics = physical.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.joinToString()
                             val distortion = physical.get(CameraCharacteristics.LENS_DISTORTION)?.joinToString()
                             val timestampSource = physical.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                            val physicalMap = physical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                            val physicalYuvSizes = outputSizes(physicalMap, ImageFormat.YUV_420_888)
                             lines += "    Physical $physicalId: focal lengths=${focal ?: "unknown"}, pixel array=${physical.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
+                            lines += "      YUV_420_888 outputs: ${sizesSummary(physicalYuvSizes)}"
                             lines += "      Lens pose rotation=${poseRotation ?: "unavailable"}, translation=${poseTranslation ?: "unavailable"}"
                             lines += "      Intrinsics=${intrinsics ?: "unavailable"}, distortion=${distortion ?: "unavailable"}, timestamp source=${timestampSource ?: "unknown"}"
                         }
                     }
                 }
+                lines += "  Sensor timestamp source: ${characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ?: "unknown"}"
                 lines += "  Sensor orientation: ${characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: "unknown"}°"
                 lines += "  Sensor pixel array: ${characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
                 lines += "  Active array: ${characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.toShortString() ?: "unknown"}"
@@ -310,6 +314,7 @@ internal class CameraCapabilityAuditor(
         lines += "- The tests above query whether those particular streams can run together."
         lines += "- Concurrent camera ID sets describe cameras Android says may be opened simultaneously."
         lines += "- Physical camera IDs do not by themselves guarantee calibrated stereo depth."
+        lines += "- If DEPTH_DEPTH_IS_EXCLUSIVE is true, depth and color must be targeted by separate capture requests."
         lines += "- A missing DEPTH16 stream means Portrait must use software-estimated depth/segmentation."
         return lines.joinToString("\n")
     }
