@@ -111,6 +111,7 @@ internal class CameraCapabilityAuditor(
                 }
                 val yuvSizes = outputSizes(streamMap, ImageFormat.YUV_420_888)
                 val depthSizes = outputSizes(streamMap, ImageFormat.DEPTH16)
+                val depthPointCloudSizes = outputSizes(streamMap, ImageFormat.DEPTH_POINT_CLOUD)
                 val rawSizes = outputSizes(streamMap, ImageFormat.RAW_SENSOR)
                 val physicalIds = if (
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
@@ -152,8 +153,12 @@ internal class CameraCapabilityAuditor(
                                 ?.joinToString { "${"%.2f".format(java.util.Locale.US, it)}mm" }
                             val poseRotation = physical.get(CameraCharacteristics.LENS_POSE_ROTATION)?.joinToString()
                             val poseTranslation = physical.get(CameraCharacteristics.LENS_POSE_TRANSLATION)?.joinToString()
+                            val intrinsics = physical.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.joinToString()
+                            val distortion = physical.get(CameraCharacteristics.LENS_DISTORTION)?.joinToString()
+                            val timestampSource = physical.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
                             lines += "    Physical $physicalId: focal lengths=${focal ?: "unknown"}, pixel array=${physical.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
                             lines += "      Lens pose rotation=${poseRotation ?: "unavailable"}, translation=${poseTranslation ?: "unavailable"}"
+                            lines += "      Intrinsics=${intrinsics ?: "unavailable"}, distortion=${distortion ?: "unavailable"}, timestamp source=${timestampSource ?: "unknown"}"
                         }
                     }
                 }
@@ -169,8 +174,10 @@ internal class CameraCapabilityAuditor(
                 lines += "  Preview (SurfaceTexture) outputs: ${sizesSummary(previewSizes)}"
                 lines += "  YUV_420_888 outputs: ${sizesSummary(yuvSizes)}"
                 lines += "  DEPTH16 outputs: ${sizesSummary(depthSizes)}"
-                lines += "  RAW_SENSOR outputs: ${sizesSummary(rawSizes)}"
+                lines += "  DEPTH_POINT_CLOUD outputs: ${sizesSummary(depthPointCloudSizes)}"
                 lines += "  DEPTH_OUTPUT capability: ${capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT)}"
+                lines += "  Depth output exclusive: ${characteristics.get(CameraCharacteristics.DEPTH_DEPTH_IS_EXCLUSIVE) ?: "unknown"}"
+                lines += "  RAW_SENSOR outputs: ${sizesSummary(rawSizes)}"
                 val fpsRanges = try {
                     streamMap?.highSpeedVideoFpsRanges
                         ?.map { "${it.lower}-${it.upper}fps" }
