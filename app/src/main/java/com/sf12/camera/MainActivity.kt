@@ -98,14 +98,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var cameraId: String? = null
     private var focusMeteringRegion: MeteringRectangle? = null
-    @Volatile private var portraitCapturePending = false
+    private data class PendingStillCapture(
+        val id: Long,
+        val portrait: Boolean,
+        val rotation: Int,
+        val focusPoints: List<Pair<Float, Float>>
+    )
+    @Volatile private var pendingStillCapture: PendingStillCapture? = null
     @Volatile private var portraitProcessing = false
-    private var portraitCaptureTimeoutRunnable: Runnable? = null
-    @Volatile private var portraitCaptureRotation = 0
+    private var captureSequenceId = 0L
+    private var captureTimeoutRunnable: Runnable? = null
     @Volatile private var portraitFocusX = 0.5f
     @Volatile private var portraitFocusY = 0.42f
     @Volatile private var portraitFocusPoints = emptyList<Pair<Float, Float>>()
-    @Volatile private var portraitCaptureFocusPoints = emptyList<Pair<Float, Float>>()
     private var portraitHasUserSelection = false
     private var previewSize: Size? = null
     private var previewSurface: Surface? = null
@@ -2140,10 +2145,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun captureStillPhoto() {
         capturePending = false
-        if (activeMode == "Portrait" && (portraitCapturePending || portraitProcessing)) {
+        if (pendingStillCapture != null || portraitProcessing) {
             Toast.makeText(
                 this,
-                "Portrait capture is still in progress. Please wait.",
+                "A photo is still being captured. Please wait.",
                 Toast.LENGTH_SHORT
             ).show()
             return
@@ -2152,7 +2157,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val session = captureSession
         val reader = imageReader
         if (device == null || session == null || reader == null) {
-            portraitCapturePending = false
             Toast.makeText(
                 this,
                 "Camera is still preparing. Try again in a moment.",
@@ -2163,29 +2167,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val portraitCapture = activeMode == "Portrait"
         val rotation = jpegOrientation()
-        portraitCapturePending = portraitCapture
-        portraitCaptureRotation = rotation
-        portraitCaptureFocusPoints = portraitFocusPoints.ifEmpty {
-            listOf(portraitFocusX to portraitFocusY)
-        }
-        if (portraitCapture) {
-            cancelPortraitCaptureTimeout()
-            val timeout = Runnable {
-                if (portraitCapturePending) {
-                    portraitCapturePending = false
-                    portraitCaptureTimeoutRunnable = null
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Portrait capture timed out. No image was received; try again.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    startPreviewRepeating()
-                }
+        val captureId = ++captureSequenceId
+        val ticket = PendingStillCapture(
+            id = captureId,
+            portrait = portraitCapture,
+            rotation = rotation,
+            focusPoints = portraitFocusPoints.ifEmpty {
+                listOf(portraitFocusX to portraitFocusY)
             }
-            portraitCaptureTimeoutRunnable = timeout
-            mainHandler.postDelayed(timeout, 12_000L)
-            Toast.makeText(this, "Capturing portrait…", Toast.LENGTH_SHORT).show()
+        )
+        pendingStillCapture = ticket
+        cancelCaptureTimeout()
+        val timeout = Runnable {
+            if (pendingStillCapture?.id == captureId) {
+                pendingStillCapture = null
+                captureTimeoutRunnable = null
+                Toast.makeText(
+                    this@MainActivity,
+                    "Capture timed out: the camera did not deliver a JPEG. Please try again.",
+                    Toast.LENGTH_LONG
+                ).show()
+                startPreviewRepeating()
+            }
         }
+        captureTimeoutRunnable = timeout
+        mainHandler.postDelayed(timeout, 15_000L)
+        Toast.makeText(
+            this,
+            if (portraitCapture) "Capturing portrait…" else "Capturing photo…",
+            Toast.LENGTH_SHORT
+        ).show()
 
         try {
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
@@ -2215,15 +2226,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     request: CaptureRequest,
                     failure: android.hardware.camera2.CaptureFailure
                 ) {
-                    portraitCapturePending = false
-                    cancelPortraitCaptureTimeout()
-                    runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Capture failed (reason ${failure.reason}). Try again.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
+                    failPendingCapture(
+                        captureId,
+                        "Capture failed (reason ${failure.reason}). Try again."
+                    )
                     startPreviewRepeating()
                 }
 
@@ -2231,33 +2237,34 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     session: CameraCaptureSession,
                     sequenceId: Int
                 ) {
-                    portraitCapturePending = false
-                    cancelPortraitCaptureTimeout()
-                    runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Portrait capture was cancelled by the camera. Try again.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
+                    failPendingCapture(
+                        captureId,
+                        "The camera cancelled the capture. Please try again."
+                    )
                     startPreviewRepeating()
                 }
             }, cameraHandler)
         } catch (e: Exception) {
-            portraitCapturePending = false
-            cancelPortraitCaptureTimeout()
-            Toast.makeText(
-                this,
-                "Capture failed: ${e.message ?: e.javaClass.simpleName}",
-                Toast.LENGTH_LONG
-            ).show()
+            failPendingCapture(
+                captureId,
+                "Capture failed: ${e.message ?: e.javaClass.simpleName}"
+            )
             startPreviewRepeating()
         }
     }
 
-    private fun cancelPortraitCaptureTimeout() {
-        portraitCaptureTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
-        portraitCaptureTimeoutRunnable = null
+    private fun cancelCaptureTimeout() {
+        captureTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        captureTimeoutRunnable = null
+    }
+
+    private fun failPendingCapture(captureId: Long, message: String) {
+        if (pendingStillCapture?.id != captureId) return
+        pendingStillCapture = null
+        cancelCaptureTimeout()
+        runOnUiThread {
+            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun applyFocusRegions(builder: CaptureRequest.Builder) {
@@ -3037,30 +3044,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             2
         ).also { reader ->
             reader.setOnImageAvailableListener({ source ->
+                // The JPEG callback uses the main queue rather than the camera
+                // callback queue. The capture ticket stays active until this
+                // listener has actually consumed the still image.
+                val ticket = pendingStillCapture
                 val image = try {
                     source.acquireNextImage()
-                } catch (error: Exception) {
-                    portraitCapturePending = false
-                    cancelPortraitCaptureTimeout()
-                    runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Couldn't receive the captured image: ${error.message ?: error.javaClass.simpleName}",
-                            Toast.LENGTH_LONG
-                        ).show()
+                } catch (error: Throwable) {
+                    ticket?.let {
+                        failPendingCapture(
+                            it.id,
+                            "Couldn't receive the captured image: ${error.javaClass.simpleName}"
+                        )
                     }
                     return@setOnImageAvailableListener
                 } ?: run {
-                    if (portraitCapturePending) {
-                        portraitCapturePending = false
-                        cancelPortraitCaptureTimeout()
-                        runOnUiThread {
-                            Toast.makeText(
-                                this@MainActivity,
-                                "The camera returned no image. Try capturing again.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
+                    ticket?.let {
+                        failPendingCapture(it.id, "The camera returned an empty image. Try again.")
                     }
                     return@setOnImageAvailableListener
                 }
@@ -3069,40 +3069,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     val buffer: ByteBuffer = image.planes[0].buffer
                     ByteArray(buffer.remaining()).also { buffer.get(it) }
                 } catch (error: Throwable) {
-                    portraitCapturePending = false
-                    cancelPortraitCaptureTimeout()
-                    runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Couldn't read the captured image: ${error.javaClass.simpleName}",
-                            Toast.LENGTH_LONG
-                        ).show()
+                    ticket?.let {
+                        failPendingCapture(
+                            it.id,
+                            "Couldn't read the captured image: ${error.javaClass.simpleName}"
+                        )
                     }
                     return@setOnImageAvailableListener
                 } finally {
                     image.close()
                 }
-                val applyPortrait = portraitCapturePending
-                val rotation = portraitCaptureRotation
-                val focusPoints = portraitCaptureFocusPoints
-                portraitCapturePending = false
-                if (applyPortrait) {
-                    cancelPortraitCaptureTimeout()
+
+                // A slow JPEG can arrive after the user-visible timeout. Save it
+                // as a normal capture rather than dropping a valid camera frame.
+                if (ticket == null || pendingStillCapture?.id != ticket.id) {
+                    saveJpeg(bytes)
+                    return@setOnImageAvailableListener
+                }
+
+                pendingStillCapture = null
+                cancelCaptureTimeout()
+                if (ticket.portrait) {
                     portraitProcessing = true
-                    runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Processing portrait…",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    Toast.makeText(
+                        this@MainActivity,
+                        "JPEG received. Processing portrait…",
+                        Toast.LENGTH_SHORT
+                    ).show()
                     Thread({
                         try {
-                            saveJpeg(createPortraitJpeg(bytes, focusPoints, rotation))
+                            saveJpeg(createPortraitJpeg(bytes, ticket.focusPoints, ticket.rotation))
                         } catch (error: Throwable) {
-                            // Catch native-library linkage errors and allocation
-                            // failures too; either must still leave the user with
-                            // the captured original rather than a missing photo.
                             val detail = "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
                             saveJpeg(bytes)
                             runOnUiThread {
@@ -3117,9 +3114,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         }
                     }, "PortraitImageProcessor").start()
                 } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "JPEG received. Saving photo…",
+                        Toast.LENGTH_SHORT
+                    ).show()
                     saveJpeg(bytes)
                 }
-            }, cameraHandler)
+            }, mainHandler)
         }
         configurePreviewSession()
     }
