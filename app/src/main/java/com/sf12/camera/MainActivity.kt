@@ -60,6 +60,11 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
+import org.opencv.android.Utils
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.imgproc.Imgproc
 
 class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
@@ -2300,7 +2305,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         try {
             val width = oriented.width
             val height = oriented.height
-            val scale = minOf(1f, 1200f / max(width, height).toFloat())
+            // Segmentation only needs enough detail to understand subject boundaries.
+            // Keeping this at 800px cuts GrabCut's pixel workload by about 56% vs 1200px.
+            val scale = minOf(1f, 800f / max(width, height).toFloat())
             val smallWidth = (width * scale).toInt().coerceAtLeast(1)
             val smallHeight = (height * scale).toInt().coerceAtLeast(1)
             val small = Bitmap.createScaledBitmap(oriented, smallWidth, smallHeight, true)
@@ -2315,46 +2322,60 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 if (small !== oriented) small.recycle()
             }
 
+            // Resize the feathered mask once with native bilinear interpolation.
+            // This replaces a costly mask-sampling function call for every output pixel.
+            val sourceMask = Mat(segmentation.height, segmentation.width, CvType.CV_8UC1)
+            val fullMaskMat = Mat()
+            val fullResolutionMask = ByteArray(width * height)
+            try {
+                sourceMask.put(0, 0, segmentation.alpha)
+                Imgproc.resize(
+                    sourceMask,
+                    fullMaskMat,
+                    org.opencv.core.Size(width.toDouble(), height.toDouble()),
+                    0.0,
+                    0.0,
+                    Imgproc.INTER_LINEAR
+                )
+                fullMaskMat.get(0, 0, fullResolutionMask)
+            } finally {
+                sourceMask.release()
+                fullMaskMat.release()
+            }
+
             val blurredPixels = blurArgbPixels(
                 smallPixels,
                 smallWidth,
                 smallHeight,
                 14
             )
+            // Precompute source positions so the full-resolution composite loop
+            // performs no per-pixel coordinate division or bilinear-mask calculations.
+            val sampleXMap = IntArray(width) { x ->
+                ((x.toLong() * smallWidth) / width).toInt().coerceIn(0, smallWidth - 1)
+            }
+            val sampleYMap = IntArray(height) { y ->
+                ((y.toLong() * smallHeight) / height).toInt().coerceIn(0, smallHeight - 1)
+            }
+
             // Composite in-place on the oriented capture. The source JPEG remains
-            // available as the fallback, so we do not need a second full-size
-            // destination Bitmap (about 48 MB at 12 MP).
+            // available as the fallback, so we do not need a second full-size Bitmap.
             val originalRow = IntArray(width)
             val outputRow = IntArray(width)
 
             for (y in 0 until height) {
                 oriented.getPixels(originalRow, 0, width, 0, y, width, 1)
-                val sampleY = ((y.toLong() * smallHeight) / height)
-                    .toInt().coerceIn(0, smallHeight - 1)
-                val maskRow = sampleY * smallWidth
-                val blurRow = sampleY * smallWidth
+                val blurRow = sampleYMap[y] * smallWidth
+                val maskRow = y * width
 
                 for (x in 0 until width) {
-                    val sampleX = ((x.toLong() * smallWidth) / width)
-                        .toInt().coerceIn(0, smallWidth - 1)
-                    // Bilinear mask sampling preserves the feather after the
-                    // low-resolution segmentation mask is mapped to the full photo.
-                    val subjectAlpha = sampleMaskAlpha(
-                        segmentation.alpha,
-                        smallWidth,
-                        smallHeight,
-                        x,
-                        y,
-                        width,
-                        height
-                    )
-                    val blurAmount = (1f - subjectAlpha / 255f).coerceIn(0f, 1f)
-
+                    val subjectAlpha = fullResolutionMask[maskRow + x].toInt() and 0xFF
+                    val blurAmount = (255 - subjectAlpha) / 255f
                     val original = originalRow[x]
                     if (blurAmount <= 0.002f) {
                         outputRow[x] = original
                     } else {
-                        val blurred = blurredPixels[blurRow + sampleX]
+                        val blurred = blurredPixels[blurRow + sampleXMap[x]]
                         val sharpWeight = 1f - blurAmount
                         val red = ((((original shr 16) and 0xFF) * sharpWeight) +
                             (((blurred shr 16) and 0xFF) * blurAmount)).toInt()
@@ -2380,115 +2401,41 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun sampleMaskAlpha(
-        mask: ByteArray,
-        sourceWidth: Int,
-        sourceHeight: Int,
-        destinationX: Int,
-        destinationY: Int,
-        destinationWidth: Int,
-        destinationHeight: Int
-    ): Float {
-        val sourceX = (
-            (destinationX + 0.5f) * sourceWidth / destinationWidth - 0.5f
-        ).coerceIn(0f, (sourceWidth - 1).toFloat())
-        val sourceY = (
-            (destinationY + 0.5f) * sourceHeight / destinationHeight - 0.5f
-        ).coerceIn(0f, (sourceHeight - 1).toFloat())
-
-        val x0 = sourceX.toInt()
-        val y0 = sourceY.toInt()
-        val x1 = (x0 + 1).coerceAtMost(sourceWidth - 1)
-        val y1 = (y0 + 1).coerceAtMost(sourceHeight - 1)
-        val fx = sourceX - x0
-        val fy = sourceY - y0
-
-        fun alphaAt(x: Int, y: Int): Float =
-            (mask[y * sourceWidth + x].toInt() and 0xFF).toFloat()
-
-        val top = alphaAt(x0, y0) * (1f - fx) + alphaAt(x1, y0) * fx
-        val bottom = alphaAt(x0, y1) * (1f - fx) + alphaAt(x1, y1) * fx
-        return top * (1f - fy) + bottom * fy
-    }
-
+    /**
+     * Blur the downscaled background with OpenCV's native Gaussian implementation.
+     * Three pairs of radius-14 box-blur passes have roughly the same spread as
+     * a Gaussian with sigma 14.5, but the native implementation avoids six Kotlin
+     * pixel-by-pixel passes and their repeated full-array allocations.
+     */
     private fun blurArgbPixels(
         source: IntArray,
         width: Int,
         height: Int,
         radius: Int
     ): IntArray {
-        var pixels = source
-        repeat(3) {
-            pixels = boxBlurPass(pixels, width, height, radius, horizontal = true)
-            pixels = boxBlurPass(pixels, width, height, radius, horizontal = false)
-        }
-        return pixels
-    }
-
-    private fun boxBlurPass(
-        source: IntArray,
-        width: Int,
-        height: Int,
-        radius: Int,
-        horizontal: Boolean
-    ): IntArray {
-        val output = IntArray(source.size)
-        val window = radius * 2 + 1
-        if (horizontal) {
-            for (y in 0 until height) {
-                val row = y * width
-                var alpha = 0
-                var red = 0
-                var green = 0
-                var blue = 0
-                for (offset in -radius..radius) {
-                    val pixel = source[row + offset.coerceIn(0, width - 1)]
-                    alpha += (pixel ushr 24) and 0xFF
-                    red += (pixel shr 16) and 0xFF
-                    green += (pixel shr 8) and 0xFF
-                    blue += pixel and 0xFF
-                }
-                for (x in 0 until width) {
-                    output[row + x] = ((alpha / window) shl 24) or
-                        ((red / window) shl 16) or
-                        ((green / window) shl 8) or
-                        (blue / window)
-                    val remove = source[row + (x - radius).coerceIn(0, width - 1)]
-                    val add = source[row + (x + radius + 1).coerceIn(0, width - 1)]
-                    alpha += ((add ushr 24) and 0xFF) - ((remove ushr 24) and 0xFF)
-                    red += ((add shr 16) and 0xFF) - ((remove shr 16) and 0xFF)
-                    green += ((add shr 8) and 0xFF) - ((remove shr 8) and 0xFF)
-                    blue += (add and 0xFF) - (remove and 0xFF)
-                }
+        val bitmap = Bitmap.createBitmap(source, width, height, Bitmap.Config.ARGB_8888)
+        val sourceMat = Mat()
+        val blurredMat = Mat()
+        try {
+            Utils.bitmapToMat(bitmap, sourceMat)
+            val sigma = radius * 1.04
+            Imgproc.GaussianBlur(
+                sourceMat,
+                blurredMat,
+                org.opencv.core.Size(0.0, 0.0),
+                sigma,
+                sigma,
+                Core.BORDER_REPLICATE
+            )
+            Utils.matToBitmap(blurredMat, bitmap)
+            return IntArray(width * height).also { pixels ->
+                bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
             }
-        } else {
-            for (x in 0 until width) {
-                var alpha = 0
-                var red = 0
-                var green = 0
-                var blue = 0
-                for (offset in -radius..radius) {
-                    val pixel = source[offset.coerceIn(0, height - 1) * width + x]
-                    alpha += (pixel ushr 24) and 0xFF
-                    red += (pixel shr 16) and 0xFF
-                    green += (pixel shr 8) and 0xFF
-                    blue += pixel and 0xFF
-                }
-                for (y in 0 until height) {
-                    output[y * width + x] = ((alpha / window) shl 24) or
-                        ((red / window) shl 16) or
-                        ((green / window) shl 8) or
-                        (blue / window)
-                    val remove = source[(y - radius).coerceIn(0, height - 1) * width + x]
-                    val add = source[(y + radius + 1).coerceIn(0, height - 1) * width + x]
-                    alpha += ((add ushr 24) and 0xFF) - ((remove ushr 24) and 0xFF)
-                    red += ((add shr 16) and 0xFF) - ((remove shr 16) and 0xFF)
-                    green += ((add shr 8) and 0xFF) - ((remove shr 8) and 0xFF)
-                    blue += (add and 0xFF) - (remove and 0xFF)
-                }
-            }
+        } finally {
+            sourceMat.release()
+            blurredMat.release()
+            bitmap.recycle()
         }
-        return output
     }
 
     private fun setFlashForRequest(builder: CaptureRequest.Builder) {
