@@ -1652,7 +1652,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 addButton,
                 FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.BOTTOM).apply {
                     marginEnd = dp(18)
-                    bottomMargin = dp(124)
+                    // Keep the edit button clear of the transparent taskbar
+                    // touch proxy, which occupies the real mode-strip bounds.
+                    bottomMargin = dp(180)
                 }
             )
         }
@@ -4933,7 +4935,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         android.graphics.Typeface.NORMAL
                     )
                 }
-                val readoutText = String.format(Locale.US, "%.0f×", currentZoom)
+                // Preserve the ultra-wide fraction; round only the main/tele zoom.
+                val readoutText = if (currentZoom < 1f) {
+                    String.format(Locale.US, "%.1f×", currentZoom)
+                } else {
+                    String.format(Locale.US, "%.0f×", currentZoom)
+                }
                 val bubbleWidth = dp(44f).toFloat()
                 val bubbleHeight = dp(46f).toFloat()
                 val bubbleRect = android.graphics.RectF(
