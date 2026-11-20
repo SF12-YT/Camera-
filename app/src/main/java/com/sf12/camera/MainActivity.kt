@@ -147,6 +147,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var backgroundThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val zoomRulerSettleRunnable = Runnable {
+        if (::zoomRuler.isInitialized && zoomRuler.visibility == View.VISIBLE) {
+            zoomRuler.setSettledReadout(true)
+        }
+    }
     private val hideFocusIndicatorRunnable = Runnable {
         if (::focusIndicator.isInitialized) {
             focusIndicator.animate()
@@ -2963,8 +2968,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        // Ultra-wide ratios are exposed in 0.1× steps when the camera reports
-        // support below 1×. Main/telephoto zoom uses every whole 1× step.
+        // Ultra-wide ratios are exposed in 0.1× steps below 1×. From 2× onward,
+        // the selectable zoom stops double each time: 2×, 4×, 8×, 16×, etc.
         if (minZoom < 1f) {
             // Keep the true lens hand-off point, rounded for display, then expose
             // the remaining ultra-wide stops in 0.1× increments.
@@ -2979,7 +2984,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         var wholeZoom = 2f
         while (wholeZoom <= maxZoom + 0.001f) {
             addLevel(wholeZoom)
-            wholeZoom += 2f
+            wholeZoom *= 2f
         }
         if (levels.isEmpty()) addLevel(1f)
         zoomLevels = levels.sorted()
@@ -3035,9 +3040,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 bounds.first,
                 bounds.second
             )
-            zoomRuler.visibility = if (
-                activeTab == "Basic" && zoomOptionsExpanded
-            ) View.VISIBLE else View.GONE
+            val rulerVisible = activeTab == "Basic" && zoomOptionsExpanded
+            zoomRuler.visibility = if (rulerVisible) View.VISIBLE else View.GONE
+            mainHandler.removeCallbacks(zoomRulerSettleRunnable)
+            zoomRuler.setSettledReadout(false)
+            if (rulerVisible) {
+                mainHandler.postDelayed(zoomRulerSettleRunnable, 500L)
+            }
         }
 
         if (!::zoomChipsRow.isInitialized) return
@@ -4208,29 +4217,62 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         configurePreviewTransform(width, height)
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (::previewView.isInitialized) {
+            previewView.post {
+                configurePreviewTransform(previewView.width, previewView.height)
+            }
+        }
+    }
+
     private fun configurePreviewTransform(viewWidth: Int, viewHeight: Int) {
         val size = previewSize ?: return
         if (viewWidth <= 0 || viewHeight <= 0) return
-        val rotation = windowManager.defaultDisplay.rotation
-        val matrix = android.graphics.Matrix()
-        val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        val bufferRect = android.graphics.RectF(
-            0f, 0f, size.height.toFloat(), size.width.toFloat()
-        )
-        val centerX = viewRect.centerX()
-        val centerY = viewRect.centerY()
 
-        if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
-            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-            matrix.setRectToRect(viewRect, bufferRect, android.graphics.Matrix.ScaleToFit.FILL)
-            val scale = max(
-                viewHeight.toFloat() / bufferRect.height(),
-                viewWidth.toFloat() / bufferRect.width()
-            )
-            matrix.postScale(scale, scale, centerX, centerY)
-            matrix.postRotate(90f * (rotation - 2), centerX, centerY)
-        } else if (rotation == Surface.ROTATION_180) {
-            matrix.postRotate(180f, centerX, centerY)
+        val displayRotationDegrees = when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        val sensorOrientation = cameraCharacteristics?.get(
+            CameraCharacteristics.SENSOR_ORIENTATION
+        ) ?: 0
+        val relativeRotation = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+            (sensorOrientation + displayRotationDegrees) % 360
+        } else {
+            (sensorOrientation - displayRotationDegrees + 360) % 360
+        }
+
+        val bufferCenterX = size.width / 2f
+        val bufferCenterY = size.height / 2f
+        val viewCenterX = viewWidth / 2f
+        val viewCenterY = viewHeight / 2f
+        val rotatedWidth = if (relativeRotation == 90 || relativeRotation == 270) {
+            size.height.toFloat()
+        } else {
+            size.width.toFloat()
+        }
+        val rotatedHeight = if (relativeRotation == 90 || relativeRotation == 270) {
+            size.width.toFloat()
+        } else {
+            size.height.toFloat()
+        }
+
+        // Scale uniformly and centre-crop. Stretching the buffer independently
+        // on each axis is what makes the preview appear squashed on some routes.
+        val scale = max(
+            viewWidth.toFloat() / rotatedWidth,
+            viewHeight.toFloat() / rotatedHeight
+        )
+        val matrix = android.graphics.Matrix().apply {
+            setRotate(relativeRotation.toFloat(), bufferCenterX, bufferCenterY)
+            postScale(scale, scale, bufferCenterX, bufferCenterY)
+            postTranslate(viewCenterX - bufferCenterX, viewCenterY - bufferCenterY)
+            if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                postScale(-1f, 1f, viewCenterX, viewCenterY)
+            }
         }
         previewView.setTransform(matrix)
     }
@@ -4839,6 +4881,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private var currentZoom = 1f
         private var minimumZoom = 1f
         private var maximumZoom = 10f
+        private var settledReadout = false
 
         private val tickPaint = android.graphics.Paint(
             android.graphics.Paint.ANTI_ALIAS_FLAG
@@ -4856,6 +4899,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             strokeWidth = dp(2f).toFloat()
             strokeCap = android.graphics.Paint.Cap.ROUND
         }
+        fun setSettledReadout(show: Boolean) {
+            if (settledReadout == show) return
+            settledReadout = show
+            invalidate()
+        }
+
         fun updateZoom(value: Float, min: Float, max: Float) {
             val safeMin = min.coerceAtLeast(0.1f)
             val safeMax = max.coerceAtLeast(safeMin)
@@ -4875,6 +4924,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (width <= 0 || height <= 0) return
 
             val centreX = width / 2f
+            if (settledReadout) {
+                val readoutPaint = android.graphics.Paint(
+                    android.graphics.Paint.ANTI_ALIAS_FLAG
+                ).apply {
+                    color = Color.WHITE
+                    textSize = dp(14f).toFloat()
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    typeface = android.graphics.Typeface.create(
+                        "sans-serif-medium",
+                        android.graphics.Typeface.NORMAL
+                    )
+                }
+                val metrics = readoutPaint.fontMetrics
+                val baseline = height / 2f - (metrics.ascent + metrics.descent) / 2f
+                canvas.drawText(
+                    String.format(Locale.US, "%.1f×", currentZoom),
+                    centreX,
+                    baseline,
+                    readoutPaint
+                )
+                return
+            }
+
             val baselineY = height.toFloat() - dp(3f).toFloat()
             val pixelsPerZoom = dp(62f).toFloat()
             val halfRange = width / (2f * pixelsPerZoom)
