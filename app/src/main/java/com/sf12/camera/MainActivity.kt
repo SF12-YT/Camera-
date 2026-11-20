@@ -3035,14 +3035,42 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             )
         }
+        centerZoomChip(selectedIndex, smooth = true)
+        refreshZoomFeedback()
+    }
+
+    /**
+     * Adds invisible space before the first chip and after the last chip so
+     * either end value can reach the centre of the viewport.
+     */
+    private fun centerZoomChip(index: Int, smooth: Boolean) {
+        if (!::zoomRow.isInitialized || !::zoomChipsRow.isInitialized) return
         zoomRow.post {
-            val selectedChip = zoomChipsRow.getChildAt(selectedIndex)
+            if (zoomRow.width <= 0 || index !in 0 until zoomChipsRow.childCount) {
+                return@post
+            }
+
+            // Each chip has a 4dp leading/trailing margin and the selected chip
+            // grows to 44dp, so this inset makes its centre land at viewport/2.
+            val edgeSpace = (zoomRow.width / 2 - dp(26)).coerceAtLeast(0)
+            if (zoomChipsRow.paddingLeft != edgeSpace ||
+                zoomChipsRow.paddingRight != edgeSpace
+            ) {
+                zoomChipsRow.setPadding(edgeSpace, 0, edgeSpace, 0)
+                zoomRow.post { centerZoomChip(index, smooth) }
+                return@post
+            }
+
+            val selectedChip = zoomChipsRow.getChildAt(index) ?: return@post
             val targetScroll = (
                 selectedChip.left + selectedChip.width / 2 - zoomRow.width / 2
             ).coerceAtLeast(0)
-            zoomRow.smoothScrollTo(targetScroll, 0)
+            if (smooth) {
+                zoomRow.smoothScrollTo(targetScroll, 0)
+            } else {
+                zoomRow.scrollTo(targetScroll, 0)
+            }
         }
-        refreshZoomFeedback()
     }
 
     private fun refreshZoomFeedback() {
@@ -3086,17 +3114,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
 
         // Keep the nearest zoom number centred while a pinch gesture changes
-        // the zoom. Do not wait for onScaleEnd to reposition the number strip.
-        zoomRow.post {
-            if (!::zoomRow.isInitialized || selectedIndex >= zoomChipsRow.childCount) {
-                return@post
-            }
-            val selectedChip = zoomChipsRow.getChildAt(selectedIndex) ?: return@post
-            val targetScroll = (
-                selectedChip.left + selectedChip.width / 2 - zoomRow.width / 2
-            ).coerceAtLeast(0)
-            zoomRow.scrollTo(targetScroll, 0)
-        }
+        // the zoom, including when the selected number is at either end.
+        centerZoomChip(selectedIndex, smooth = false)
     }
 
     private fun setZoom(value: Float) {
