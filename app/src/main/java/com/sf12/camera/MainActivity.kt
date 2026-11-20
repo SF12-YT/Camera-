@@ -3299,6 +3299,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun fallbackFromStandaloneUltraWideCamera(message: String) {
         if (!usingStandaloneUltraWideCamera) return
         usingStandaloneUltraWideCamera = false
+        ultraWideIsStandaloneCameraId = false
+        ultraWidePhysicalCameraId = null
+        ultraWideCameraCharacteristics = null
+        ultraWideBaseZoomRatio = 1f
         activePhysicalCameraId = null
         zoomRatio = 1f
         cameraId = rearMainCameraId ?: findCameraId(
@@ -3466,10 +3470,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }, cameraHandler)
         } catch (e: CameraAccessException) {
             openingCamera = false
-            Toast.makeText(this, "Unable to open camera: ${e.reason}", Toast.LENGTH_LONG).show()
+            if (usingStandaloneUltraWideCamera) {
+                fallbackFromStandaloneUltraWideCamera(
+                    "The ultra-wide camera could not be accessed: ${e.reason}."
+                )
+            } else {
+                Toast.makeText(this, "Unable to open camera: ${e.reason}", Toast.LENGTH_LONG).show()
+            }
         } catch (e: SecurityException) {
             openingCamera = false
-            requestCameraPermissions()
+            if (usingStandaloneUltraWideCamera) {
+                fallbackFromStandaloneUltraWideCamera(
+                    "The ultra-wide camera is not accessible to this app."
+                )
+            } else {
+                requestCameraPermissions()
+            }
         }
     }
 
