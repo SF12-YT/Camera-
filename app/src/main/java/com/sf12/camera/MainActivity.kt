@@ -24,6 +24,8 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
 import android.graphics.ImageFormat
 import android.media.ImageReader
 import android.net.Uri
@@ -58,6 +60,7 @@ import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executor
 import kotlin.math.abs
 import kotlin.math.max
 import org.opencv.android.Utils
@@ -87,6 +90,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var captureHiddenViewStates: List<Pair<View, Int>>? = null
     private var captureFrozenPreview: Bitmap? = null
     private var captureFrozenPreviewView: ImageView? = null
+    private var ultraWidePhysicalCameraId: String? = null
+    private var ultraWideCameraCharacteristics: CameraCharacteristics? = null
+    private var ultraWideBaseZoomRatio = 1f
+    private var activePhysicalCameraId: String? = null
+    private var zoomOptionsExpanded = false
 
     private lateinit var settingsButton: CameraIconButton
     private lateinit var flashButton: CameraIconButton
@@ -108,6 +116,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var cameraId: String? = null
     private var focusMeteringRegion: MeteringRectangle? = null
+    private data class PhysicalLensInfo(
+        val id: String,
+        val characteristics: CameraCharacteristics,
+        val effectiveFocalLength: Float
+    )
+
     private data class PendingStillCapture(
         val id: Long,
         val portrait: Boolean,
@@ -639,18 +653,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         scaleGestureDetector = ScaleGestureDetector(
             this,
             object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    zoomOptionsExpanded = true
+                    setZoomButtons()
+                    return true
+                }
+
                 override fun onScale(detector: ScaleGestureDetector): Boolean {
                     val bounds = zoomBounds()
                     val nextZoom = (zoomRatio * detector.scaleFactor)
                         .coerceIn(bounds.first, bounds.second)
                     if (abs(nextZoom - zoomRatio) > 0.002f) {
                         zoomRatio = nextZoom
-                        startPreviewRepeating()
+                        val routeChanged = updateZoomCameraRoute()
+                        if (!routeChanged) startPreviewRepeating()
+                        if (zoomOptionsExpanded) setZoomButtons()
                     }
                     return true
                 }
 
                 override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    if (abs(zoomRatio - 1f) < 0.025f) {
+                        zoomRatio = 1f
+                        zoomOptionsExpanded = false
+                    }
                     setZoomButtons()
                 }
             }
@@ -2621,6 +2647,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun applyZoom(builder: CaptureRequest.Builder) {
         val characteristics = cameraCharacteristics ?: return
+
+        val physicalId = activePhysicalCameraId
+        val physicalCharacteristics = ultraWideCameraCharacteristics
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            physicalId != null &&
+            physicalCharacteristics != null
+        ) {
+            val activeArray = physicalCharacteristics.get(
+                CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
+            ) ?: return
+            val physicalZoom = (zoomRatio / ultraWideBaseZoomRatio).coerceAtLeast(1f)
+            val cropWidth = (activeArray.width() / physicalZoom).toInt().coerceAtLeast(1)
+            val cropHeight = (activeArray.height() / physicalZoom).toInt().coerceAtLeast(1)
+            val left = activeArray.centerX() - cropWidth / 2
+            val top = activeArray.centerY() - cropHeight / 2
+            val crop = Rect(left, top, left + cropWidth, top + cropHeight)
+            val physicalKeys = characteristics.availablePhysicalCameraRequestKeys
+            if (physicalKeys?.contains(CaptureRequest.SCALER_CROP_REGION) == true) {
+                builder.setPhysicalCameraKey(
+                    CaptureRequest.SCALER_CROP_REGION,
+                    crop,
+                    physicalId
+                )
+            } else {
+                builder.set(CaptureRequest.SCALER_CROP_REGION, crop)
+            }
+            return
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val range: Range<Float>? = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
             if (range != null) {
@@ -2667,16 +2723,99 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun zoomBounds(): Pair<Float, Float> {
         val characteristics = cameraCharacteristics ?: return 1f to 1f
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val range = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
-            if (range != null) {
-                return range.lower.coerceAtLeast(0.1f) to range.upper.coerceAtLeast(1f)
-            }
+        val range = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+        } else {
+            null
         }
-        val maxZoom = characteristics
-            .get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
-            ?.coerceAtLeast(1f) ?: 1f
-        return 1f to maxZoom
+        val logicalMinimum = range?.lower?.coerceAtLeast(0.1f) ?: 1f
+        val physicalMinimum = if (
+            ultraWidePhysicalCameraId != null &&
+            logicalMinimum >= 0.98f
+        ) {
+            ultraWideBaseZoomRatio
+        } else {
+            1f
+        }
+        val maxZoom = range?.upper?.coerceAtLeast(1f)
+            ?: characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+                ?.coerceAtLeast(1f)
+            ?: 1f
+        return minOf(logicalMinimum, physicalMinimum) to maxZoom
+    }
+
+    private fun discoverUltraWidePhysicalCamera() {
+        ultraWidePhysicalCameraId = null
+        ultraWideCameraCharacteristics = null
+        ultraWideBaseZoomRatio = 1f
+        activePhysicalCameraId = null
+
+        val logical = cameraCharacteristics ?: return
+        if (
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            lensFacing != CameraCharacteristics.LENS_FACING_BACK
+        ) return
+
+        val logicalCapabilities = logical.get(
+            CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+        ) ?: intArrayOf()
+        if (!logicalCapabilities.contains(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+            )
+        ) return
+
+        val lenses = logical.physicalCameraIds.mapNotNull { physicalId ->
+            try {
+                val physical = cameraManager.getCameraCharacteristics(physicalId)
+                val focalLength = physical.get(
+                    CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                )?.minOrNull() ?: return@mapNotNull null
+                val sensorSize = physical.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                val effectiveFocal = if (sensorSize != null && sensorSize.width > 0f) {
+                    focalLength * 36f / sensorSize.width
+                } else {
+                    focalLength
+                }
+                PhysicalLensInfo(physicalId, physical, effectiveFocal)
+            } catch (_: Exception) {
+                null
+            }
+        }.sortedBy { it.effectiveFocalLength }
+
+        if (lenses.size < 2) return
+        val wide = lenses.first()
+        val main = lenses[1]
+        if (main.effectiveFocalLength <= 0f) return
+        val ratio = wide.effectiveFocalLength / main.effectiveFocalLength
+        // A true ultra-wide lens has a materially wider field of view than main.
+        if (ratio !in 0.20f..0.88f) return
+
+        ultraWidePhysicalCameraId = wide.id
+        ultraWideCameraCharacteristics = wide.characteristics
+        ultraWideBaseZoomRatio = ratio
+    }
+
+    private fun updateZoomCameraRoute(): Boolean {
+        val logicalRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            cameraCharacteristics?.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+        } else {
+            null
+        }
+        val canZoomOutLogically = (logicalRange?.lower ?: 1f) < 0.98f
+        val targetPhysicalId = if (
+            lensFacing == CameraCharacteristics.LENS_FACING_BACK &&
+            !canZoomOutLogically &&
+            ultraWidePhysicalCameraId != null &&
+            zoomRatio < 0.98f
+        ) {
+            ultraWidePhysicalCameraId
+        } else {
+            null
+        }
+        if (targetPhysicalId == activePhysicalCameraId) return false
+        activePhysicalCameraId = targetPhysicalId
+        if (cameraDevice != null) createImageReaderAndSession()
+        return true
     }
 
     private fun setZoomButtons() {
@@ -2698,7 +2837,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Ultra-wide ratios are exposed in 0.1× steps when the camera reports
         // support below 1×. Main/telephoto zoom uses every whole 1× step.
         if (minZoom < 1f) {
-            addLevel(minZoom)
             var tenthStep = kotlin.math.ceil(minZoom * 10f - 0.001f).toInt()
             while (tenthStep < 10) {
                 addLevel(tenthStep / 10f)
@@ -2718,16 +2856,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         zoomLevels = levels.sorted()
         zoomRatio = zoomRatio.coerceIn(minZoom, maxZoom)
 
-        val selectedIndex = zoomLevels.indices.minByOrNull {
-            abs(zoomRatio - zoomLevels[it])
+        val visibleLevels = if (zoomOptionsExpanded) {
+            zoomLevels
+        } else {
+            listOf(1f)
+        }
+        val selectedIndex = visibleLevels.indices.minByOrNull {
+            abs(zoomRatio - visibleLevels[it])
         } ?: 0
-        zoomLevels.forEachIndexed { index, level ->
+        visibleLevels.forEachIndexed { index, level ->
             val selected = index == selectedIndex
-            val label = if (abs(level - level.toInt()) < 0.01f) {
-                "${level.toInt()}×"
-            } else {
-                "${String.format(Locale.US, "%.1f", level)}×"
-            }
+            val label = "${String.format(Locale.US, "%.1f", level)}×"
             val chip = TextView(this).apply {
                 text = label
                 textSize = 12f
@@ -2760,8 +2899,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun setZoom(value: Float) {
         val bounds = zoomBounds()
         zoomRatio = value.coerceIn(bounds.first, bounds.second)
+        zoomOptionsExpanded = abs(zoomRatio - 1f) >= 0.025f
+        val routeChanged = updateZoomCameraRoute()
         setZoomButtons()
-        startPreviewRepeating()
+        if (!routeChanged) startPreviewRepeating()
     }
 
     private fun showGalleryThumbnail(uri: Uri) {
@@ -3062,6 +3203,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             return
         }
         lensFacing = targetFacing
+        zoomRatio = 1f
+        zoomOptionsExpanded = false
+        activePhysicalCameraId = null
         closeCamera()
         cameraId = targetId
         if (previewView.isAvailable) openCamera()
@@ -3136,6 +3280,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     openingCamera = false
                     cameraDevice = camera
                     cameraCharacteristics = cameraManager.getCameraCharacteristics(id)
+                    if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+                        discoverUltraWidePhysicalCamera()
+                    } else {
+                        ultraWidePhysicalCameraId = null
+                        ultraWideCameraCharacteristics = null
+                        ultraWideBaseZoomRatio = 1f
+                        activePhysicalCameraId = null
+                        zoomRatio = 1f
+                        zoomOptionsExpanded = false
+                    }
                     runOnUiThread {
                         refreshDeviceSpecificModes()
                         setZoomButtons()
@@ -3170,7 +3324,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun createImageReaderAndSession() {
         val characteristics = cameraCharacteristics ?: return
-        val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return
+        val streamCharacteristics = if (activePhysicalCameraId != null) {
+            ultraWideCameraCharacteristics ?: characteristics
+        } else {
+            characteristics
+        }
+        val map = streamCharacteristics.get(
+            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+        ) ?: return
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG)?.toList().orEmpty()
         if (jpegSizes.isEmpty()) {
             runOnUiThread {
@@ -3340,27 +3501,68 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 "Camera capability audit failed: ${error.message ?: error.javaClass.simpleName}"
             }
             configurePreviewTransform(previewView.width, previewView.height)
-            device.createCaptureSession(
-                listOf(previewSurface!!, reader.surface),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        if (cameraDevice !== device) {
-                            session.close()
-                            return
-                        }
-                        captureSession = session
-                        startPreviewRepeating()
-                    }
-
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
+            val sessionCallback = object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    if (cameraDevice !== device) {
                         session.close()
+                        return
+                    }
+                    captureSession = session
+                    startPreviewRepeating()
+                }
+
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    session.close()
+                    if (activePhysicalCameraId != null) {
+                        // Some HALs expose a physical lens but reject this stream
+                        // combination. Fall back cleanly to the logical main lens.
+                        activePhysicalCameraId = null
+                        zoomRatio = 1f
                         runOnUiThread {
-                            Toast.makeText(this@MainActivity, "Unable to configure camera preview.", Toast.LENGTH_LONG).show()
+                            setZoomButtons()
+                            createImageReaderAndSession()
+                        }
+                    } else {
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Unable to configure camera preview.",
+                                Toast.LENGTH_LONG
+                            ).show()
                         }
                     }
-                },
-                cameraHandler
-            )
+                }
+            }
+
+            val physicalId = activePhysicalCameraId
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
+                val outputConfigurations = listOf(
+                    OutputConfiguration(previewSurface!!).apply {
+                        setPhysicalCameraId(physicalId)
+                    },
+                    OutputConfiguration(reader.surface).apply {
+                        setPhysicalCameraId(physicalId)
+                    }
+                )
+                val callbackExecutor = Executor { command ->
+                    val handler = cameraHandler
+                    if (handler != null) handler.post(command) else mainHandler.post(command)
+                }
+                device.createCaptureSession(
+                    SessionConfiguration(
+                        SessionConfiguration.SESSION_REGULAR,
+                        outputConfigurations,
+                        callbackExecutor,
+                        sessionCallback
+                    )
+                )
+            } else {
+                device.createCaptureSession(
+                    listOf(previewSurface!!, reader.surface),
+                    sessionCallback,
+                    cameraHandler
+                )
+            }
         } catch (e: CameraAccessException) {
             Toast.makeText(this, "Camera setup failed: ${e.reason}", Toast.LENGTH_LONG).show()
         }
@@ -3432,7 +3634,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun currentZoomCrop(activeArray: Rect): Rect {
-        val zoom = zoomRatio.coerceAtLeast(1f)
+        val zoom = if (activePhysicalCameraId != null) {
+            (zoomRatio / ultraWideBaseZoomRatio).coerceAtLeast(1f)
+        } else {
+            zoomRatio.coerceAtLeast(1f)
+        }
         val cropWidth = (activeArray.width() / zoom).toInt().coerceAtLeast(1)
         val cropHeight = (activeArray.height() / zoom).toInt().coerceAtLeast(1)
         val left = activeArray.centerX() - cropWidth / 2
@@ -3470,8 +3676,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         addPortraitSubject: Boolean = false
     ) {
         val characteristics = cameraCharacteristics ?: return
-        val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-            ?: return
+        val activeLensCharacteristics = if (activePhysicalCameraId != null) {
+            ultraWideCameraCharacteristics ?: characteristics
+        } else {
+            characteristics
+        }
+        val activeArray = activeLensCharacteristics.get(
+            CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
+        ) ?: return
         val viewWidth = previewView.width.toFloat()
         val viewHeight = previewView.height.toFloat()
         if (viewWidth <= 0f || viewHeight <= 0f) return
