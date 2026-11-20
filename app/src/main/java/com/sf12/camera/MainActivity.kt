@@ -4361,20 +4361,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (viewWidth <= 0 || viewHeight <= 0) return
 
         val rotation = windowManager.defaultDisplay.rotation
-        val swapsDimensions =
-            rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270
         val matrix = android.graphics.Matrix()
         val viewRect = android.graphics.RectF(
             0f, 0f, viewWidth.toFloat(), viewHeight.toFloat()
         )
-        // Use the buffer's actual orientation for the current display rotation.
-        // The old path skipped all scaling at ROTATION_0, which stretched the
-        // camera stream to the TextureView and caused intermittent squashing.
-        val bufferRect = if (swapsDimensions) {
-            android.graphics.RectF(0f, 0f, size.height.toFloat(), size.width.toFloat())
-        } else {
-            android.graphics.RectF(0f, 0f, size.width.toFloat(), size.height.toFloat())
-        }
+        // Keep the same portrait-oriented buffer mapping used by the existing
+        // rotation fix, but calculate a uniform fill scale at every rotation.
+        // Previously ROTATION_0 skipped this step and TextureView could stretch
+        // the preview non-uniformly to fill the available space.
+        val bufferRect = android.graphics.RectF(
+            0f, 0f, size.height.toFloat(), size.width.toFloat()
+        )
         val centerX = viewRect.centerX()
         val centerY = viewRect.centerY()
 
@@ -4393,7 +4390,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
         matrix.postScale(scale, scale, centerX, centerY)
 
-        if (swapsDimensions) {
+        if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
             matrix.postRotate(90f * (rotation - 2), centerX, centerY)
         } else if (rotation == Surface.ROTATION_180) {
             matrix.postRotate(180f, centerX, centerY)
