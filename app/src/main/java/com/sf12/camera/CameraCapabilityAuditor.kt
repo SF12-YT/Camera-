@@ -158,7 +158,19 @@ internal class CameraCapabilityAuditor(
                             val timestampSource = physical.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
                             val physicalMap = physical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                             val physicalYuvSizes = outputSizes(physicalMap, ImageFormat.YUV_420_888)
-                            lines += "    Physical $physicalId: focal lengths=${focal ?: "unknown"}, pixel array=${physical.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
+                            val physicalSensorSize = physical.get(
+                                CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE
+                            )
+                            val physicalEquivalentFocal = physical.get(
+                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                            )?.maxOrNull()?.let { focalLength ->
+                                if (physicalSensorSize != null && physicalSensorSize.width > 0f) {
+                                    focalLength * 36f / physicalSensorSize.width
+                                } else {
+                                    null
+                                }
+                            }
+                            lines += "    Physical $physicalId: focal lengths=${focal ?: "unknown"}, 35mm-equivalent=${physicalEquivalentFocal?.let { "${"%.2f".format(java.util.Locale.US, it)}mm" } ?: "not calculable"}, sensor size=${physicalSensorSize ?: "unknown"}, pixel array=${physical.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
                             lines += "      YUV_420_888 outputs: ${sizesSummary(physicalYuvSizes)}"
                             lines += "      Lens pose rotation=${poseRotation ?: "unavailable"}, translation=${poseTranslation ?: "unavailable"}"
                             lines += "      Intrinsics=${intrinsics ?: "unavailable"}, distortion=${distortion ?: "unavailable"}, timestamp source=${timestampSource ?: "unknown"}"
@@ -169,7 +181,28 @@ internal class CameraCapabilityAuditor(
                 lines += "  Sensor orientation: ${characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: "unknown"}°"
                 lines += "  Sensor pixel array: ${characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}"
                 lines += "  Active array: ${characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.toShortString() ?: "unknown"}"
-                lines += "  Focal lengths: ${characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString { "${"%.2f".format(java.util.Locale.US, it)}mm" } ?: "unknown"}"
+                val focalLengths = characteristics.get(
+                    CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                )
+                val physicalSensorSize = characteristics.get(
+                    CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE
+                )
+                val equivalentFocal = focalLengths?.maxOrNull()?.let { focal ->
+                    if (physicalSensorSize != null && physicalSensorSize.width > 0f) {
+                        focal * 36f / physicalSensorSize.width
+                    } else {
+                        null
+                    }
+                }
+                val zoomRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                } else {
+                    null
+                }
+                lines += "  Sensor physical size: ${physicalSensorSize ?: "not reported"}"
+                lines += "  Focal lengths: ${focalLengths?.joinToString { "${"%.2f".format(java.util.Locale.US, it)}mm" } ?: "unknown"}"
+                lines += "  Approx. 35mm-equivalent focal length: ${equivalentFocal?.let { "${"%.2f".format(java.util.Locale.US, it)}mm" } ?: "not calculable"}"
+                lines += "  CONTROL_ZOOM_RATIO_RANGE: ${zoomRange?.let { "${it.lower}× to ${it.upper}×" } ?: "not exposed"}"
                 lines += "  Minimum focus distance: ${characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: "unknown"} dioptres"
                 lines += "  AF modes: ${characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.map(::afModeName)?.joinToString().orEmpty().ifBlank { "none reported" }}"
                 lines += "  AF / AE metering regions: ${characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0} / ${characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0}"
