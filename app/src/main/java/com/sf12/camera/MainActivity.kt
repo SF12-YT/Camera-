@@ -148,8 +148,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraHandler: Handler? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val zoomRulerSettleRunnable = Runnable {
-        if (::zoomRuler.isInitialized && zoomRuler.visibility == View.VISIBLE) {
+        if (
+            ::zoomRuler.isInitialized &&
+            ::zoomRow.isInitialized &&
+            zoomRuler.visibility == View.VISIBLE &&
+            zoomOptionsExpanded &&
+            activeTab == "Basic"
+        ) {
             zoomRuler.setSettledReadout(true)
+            zoomRow.visibility = View.GONE
         }
     }
     private val hideFocusIndicatorRunnable = Runnable {
@@ -472,7 +479,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ))
         zoomRuler = ZoomRulerView(this).apply {
             visibility = View.GONE
-            contentDescription = "Continuous zoom scale"
+            contentDescription = "Zoom readout; tap to reopen zoom controls"
+            setOnClickListener {
+                zoomOptionsExpanded = true
+                setZoomButtons()
+            }
         }
         bottomPanel.addView(
             zoomRuler,
@@ -3033,6 +3044,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun refreshZoomFeedback() {
+        if (::zoomRow.isInitialized) zoomRow.visibility = View.VISIBLE
         if (::zoomRuler.isInitialized) {
             val bounds = zoomBounds()
             zoomRuler.updateZoom(
