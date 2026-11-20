@@ -3057,7 +3057,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             mainHandler.removeCallbacks(zoomRulerSettleRunnable)
             zoomRuler.setSettledReadout(false)
             if (rulerVisible) {
-                mainHandler.postDelayed(zoomRulerSettleRunnable, 500L)
+                mainHandler.postDelayed(zoomRulerSettleRunnable, 2000L)
             }
         }
 
@@ -4911,6 +4911,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             strokeWidth = dp(2f).toFloat()
             strokeCap = android.graphics.Paint.Cap.ROUND
         }
+        private val readoutBubblePaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = 0xD9000000.toInt()
+            style = android.graphics.Paint.Style.FILL
+        }
+        private val readoutBubbleStrokePaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = 0x66FFFFFF
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = dp(1f).toFloat()
+        }
         fun setSettledReadout(show: Boolean) {
             if (settledReadout == show) return
             settledReadout = show
@@ -4948,14 +4961,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         android.graphics.Typeface.NORMAL
                     )
                 }
+                val readoutText = String.format(Locale.US, "%.0f×", currentZoom)
+                val bubbleHeight = dp(25f).toFloat()
+                val horizontalPadding = dp(12f).toFloat()
+                val bubbleWidth = readoutPaint.measureText(readoutText) + horizontalPadding * 2f
+                val bubbleRect = android.graphics.RectF(
+                    centreX - bubbleWidth / 2f,
+                    (height - bubbleHeight) / 2f,
+                    centreX + bubbleWidth / 2f,
+                    (height + bubbleHeight) / 2f
+                )
+                val bubbleRadius = bubbleHeight / 2f
+                canvas.drawRoundRect(
+                    bubbleRect,
+                    bubbleRadius,
+                    bubbleRadius,
+                    readoutBubblePaint
+                )
+                canvas.drawRoundRect(
+                    bubbleRect,
+                    bubbleRadius,
+                    bubbleRadius,
+                    readoutBubbleStrokePaint
+                )
                 val metrics = readoutPaint.fontMetrics
                 val baseline = height / 2f - (metrics.ascent + metrics.descent) / 2f
-                canvas.drawText(
-                    String.format(Locale.US, "%.1f×", currentZoom),
-                    centreX,
-                    baseline,
-                    readoutPaint
-                )
+                canvas.drawText(readoutText, centreX, baseline, readoutPaint)
                 return
             }
 
