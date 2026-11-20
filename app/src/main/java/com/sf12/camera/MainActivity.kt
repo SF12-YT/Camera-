@@ -667,7 +667,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         zoomRatio = nextZoom
                         val routeChanged = updateZoomCameraRoute()
                         if (!routeChanged) startPreviewRepeating()
-                        if (zoomOptionsExpanded) setZoomButtons()
                     }
                     return true
                 }
