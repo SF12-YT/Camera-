@@ -82,6 +82,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var modeRow: LinearLayout
     private lateinit var shutterRow: LinearLayout
     private lateinit var statusHint: TextView
+    private var captureOverlay: FrameLayout? = null
+    private var captureHiddenViewStates: List<Pair<View, Int>>? = null
 
     private lateinit var settingsButton: CameraIconButton
     private lateinit var flashButton: CameraIconButton
@@ -284,6 +286,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onPause() {
         mainHandler.removeCallbacks(timerRunnable)
         capturePending = false
+        dismissCaptureOverlay(animate = false)
         closeCamera()
         stopCameraThread()
         super.onPause()
@@ -2135,6 +2138,101 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private fun showCaptureOverlay() {
+        if (!::root.isInitialized || captureOverlay != null) return
+
+        // Keep only the TextureView visible so the live viewfinder remains clear.
+        // Saving every child state also handles temporary panels and mode overlays.
+        captureHiddenViewStates = (0 until root.childCount)
+            .map { root.getChildAt(it) }
+            .filter { it !== previewView }
+            .map { it to it.visibility }
+        captureHiddenViewStates?.forEach { (view, _) ->
+            view.animate().cancel()
+            view.visibility = View.GONE
+        }
+
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            isFocusable = true
+            elevation = dp(100).toFloat()
+            alpha = 0f
+            contentDescription = "Capturing image"
+        }
+
+        val message = TextView(this).apply {
+            text = "Capturing image..."
+            textSize = 18f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            setShadowLayer(dp(8).toFloat(), 0f, dp(2).toFloat(), 0xCC000000.toInt())
+            isClickable = false
+        }
+        overlay.addView(
+            message,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            ).apply {
+                leftMargin = dp(24)
+                rightMargin = dp(24)
+            }
+        )
+
+        val indicator = CaptureLoadingIndicator(this)
+        overlay.addView(
+            indicator,
+            FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = dp(58)
+            }
+        )
+
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        overlay.bringToFront()
+        captureOverlay = overlay
+        overlay.animate()
+            .alpha(1f)
+            .setDuration(180L)
+            .start()
+    }
+
+    private fun dismissCaptureOverlay(animate: Boolean = true) {
+        val overlay = captureOverlay ?: return
+        captureOverlay = null
+
+        val restoreUi = {
+            if (overlay.parent === root) root.removeView(overlay)
+            captureHiddenViewStates?.forEach { (view, visibility) ->
+                if (view.parent === root) view.visibility = visibility
+            }
+            captureHiddenViewStates = null
+        }
+
+        if (animate && overlay.isAttachedToWindow && !isFinishing) {
+            overlay.animate().cancel()
+            overlay.animate()
+                .alpha(0f)
+                .setDuration(180L)
+                .withEndAction { restoreUi() }
+                .start()
+        } else {
+            restoreUi()
+        }
+    }
+
     private fun onShutterPressed() {
         if (activeTab != "Basic" || activeMode !in listOf("Photo", "Portrait")) return
         if (capturePending) return
@@ -2182,11 +2280,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         )
         pendingStillCapture = ticket
+        showCaptureOverlay()
         cancelCaptureTimeout()
         val timeout = Runnable {
             if (pendingStillCapture?.id == captureId) {
                 pendingStillCapture = null
                 captureTimeoutRunnable = null
+                dismissCaptureOverlay()
                 Toast.makeText(
                     this@MainActivity,
                     "Capture timed out: the camera did not deliver a JPEG. Please try again.",
@@ -2197,12 +2297,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         captureTimeoutRunnable = timeout
         mainHandler.postDelayed(timeout, 15_000L)
-        Toast.makeText(
-            this,
-            if (portraitCapture) "Capturing portrait…" else "Capturing photo…",
-            Toast.LENGTH_SHORT
-        ).show()
-
         try {
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
@@ -2268,6 +2362,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingStillCapture = null
         cancelCaptureTimeout()
         runOnUiThread {
+            dismissCaptureOverlay()
             Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
         }
     }
@@ -3038,24 +3133,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 cancelCaptureTimeout()
                 if (ticket.portrait) {
                     portraitProcessing = true
-                    Toast.makeText(
-                        this@MainActivity,
-                        "JPEG received. Saving original first…",
-                        Toast.LENGTH_SHORT
-                    ).show()
                     Thread({
+                        var savedPhotoUri: Uri? = null
+                        var completionMessage: String? = null
                         try {
-                            // Never hold the only copy of a capture in RAM while
-                            // running expensive segmentation. Publish the original
-                            // immediately, then replace its contents after processing.
-                            val savedPhotoUri = saveJpeg(bytes) ?: return@Thread
-                            runOnUiThread {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Original saved. Applying Portrait effect…",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
+                            // Publish the original first, then replace it after the
+                            // offline Portrait effect has finished processing.
+                            savedPhotoUri = saveJpeg(bytes, showSavedToast = false)
+                                ?: return@Thread
 
                             val portraitBytes = createPortraitJpeg(
                                 bytes,
@@ -3063,34 +3148,42 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                                 ticket.rotation
                             )
                             replaceSavedJpeg(savedPhotoUri, portraitBytes)
-                            runOnUiThread {
-                                showGalleryThumbnail(savedPhotoUri)
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Portrait effect applied.",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
+                            completionMessage = "Portrait effect applied."
                         } catch (error: Throwable) {
                             val detail = "${error.javaClass.simpleName}: ${error.message ?: "no details"}"
-                            runOnUiThread {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Portrait processing failed ($detail). Original photo was kept.",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
+                            completionMessage =
+                                "Portrait processing failed ($detail). Original photo was kept."
                         } finally {
                             portraitProcessing = false
+                            mainHandler.post {
+                                savedPhotoUri?.let { showGalleryThumbnail(it) }
+                                dismissCaptureOverlay()
+                                completionMessage?.let { message ->
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        message,
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
                         }
                     }, "PortraitImageProcessor").start()
                 } else {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "JPEG received. Saving photo…",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    saveJpeg(bytes)
+                    // Keep disk I/O off the main thread so the loading animation
+                    // remains responsive while the captured JPEG is written.
+                    Thread({
+                        val savedPhotoUri = saveJpeg(bytes, showSavedToast = false)
+                        mainHandler.post {
+                            dismissCaptureOverlay()
+                            if (savedPhotoUri != null) {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Photo saved.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }, "PhotoImageSaver").start()
                 }
             }, mainHandler)
         }
@@ -3378,7 +3471,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun saveJpeg(bytes: ByteArray): Uri? {
+    private fun saveJpeg(
+        bytes: ByteArray,
+        showSavedToast: Boolean = true
+    ): Uri? {
         val storage = selectedCameraStorageLocation()
         if (storage == null) {
             runOnUiThread {
@@ -3426,11 +3522,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
             runOnUiThread {
                 showGalleryThumbnail(uri)
-                Toast.makeText(
-                    this,
-                    "Photo saved to ${storage.label}/DCIM/Camera",
-                    Toast.LENGTH_SHORT
-                ).show()
+                if (showSavedToast) {
+                    Toast.makeText(
+                        this,
+                        "Photo saved to ${storage.label}/DCIM/Camera",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
             return uri
         } catch (e: Throwable) {
@@ -3596,6 +3694,77 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun textDrawablePlaceholder(): GradientDrawable = GradientDrawable().apply {
         setColor(0x66555555)
         cornerRadius = dp(8).toFloat()
+    }
+
+    private inner class CaptureLoadingIndicator(context: Context) : View(context) {
+        private val indicatorPaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        )
+        private var rotationDegrees = 0f
+        private var rotationAnimator: android.animation.ValueAnimator? = null
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            rotationAnimator?.cancel()
+            rotationAnimator = android.animation.ValueAnimator.ofFloat(0f, 360f).apply {
+                duration = 1_050L
+                repeatCount = android.animation.ValueAnimator.INFINITE
+                interpolator = android.view.animation.LinearInterpolator()
+                addUpdateListener { animation ->
+                    rotationDegrees = animation.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
+
+        override fun onDetachedFromWindow() {
+            rotationAnimator?.cancel()
+            rotationAnimator = null
+            super.onDetachedFromWindow()
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            val centerX = width / 2f
+            val centerY = height / 2f
+            val radius = dp(18).toFloat()
+            val segmentWidth = dp(4).toFloat()
+            val segmentHeight = dp(6).toFloat()
+
+            // Eight rotating focus marks create a camera-inspired loading cycle.
+            for (index in 0 until 8) {
+                canvas.save()
+                canvas.rotate(rotationDegrees - index * 45f, centerX, centerY)
+                indicatorPaint.style = android.graphics.Paint.Style.FILL
+                indicatorPaint.color = if (index == 0) 0xFFFFD54F.toInt() else Color.WHITE
+                indicatorPaint.alpha = (255 - index * 27).coerceAtLeast(58)
+                val mark = android.graphics.RectF(
+                    centerX - segmentWidth / 2f,
+                    centerY - radius - segmentHeight / 2f,
+                    centerX + segmentWidth / 2f,
+                    centerY - radius + segmentHeight / 2f
+                )
+                canvas.drawRoundRect(
+                    mark,
+                    segmentWidth / 2f,
+                    segmentWidth / 2f,
+                    indicatorPaint
+                )
+                canvas.restore()
+            }
+
+            indicatorPaint.style = android.graphics.Paint.Style.STROKE
+            indicatorPaint.strokeWidth = dp(1).toFloat()
+            indicatorPaint.color = Color.WHITE
+            indicatorPaint.alpha = 70
+            canvas.drawCircle(centerX, centerY, dp(8).toFloat(), indicatorPaint)
+
+            indicatorPaint.style = android.graphics.Paint.Style.FILL
+            indicatorPaint.color = 0xFFFFD54F.toInt()
+            indicatorPaint.alpha = 230
+            canvas.drawCircle(centerX, centerY, dp(2).toFloat(), indicatorPaint)
+        }
     }
 
     private inner class CameraIconButton(
