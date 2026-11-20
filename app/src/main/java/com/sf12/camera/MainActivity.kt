@@ -3421,6 +3421,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (!routeChanged) startPreviewRepeating()
     }
 
+    private fun showGalleryThumbnail(uri: Uri) {
+        if (!::galleryThumbnail.isInitialized) return
+        galleryThumbnail.setImageURI(uri)
+        galleryThumbnail.contentDescription = "Most recent photo"
+        galleryVideoBadge.visibility = View.GONE
+        galleryPlaceholder.visibility = View.GONE
+    }
+
     private fun showGalleryThumbnail(item: CameraGalleryItem, videoFrame: Bitmap?) {
         if (!::galleryThumbnail.isInitialized) return
         val isVideo = item.mimeType.startsWith("video/")
