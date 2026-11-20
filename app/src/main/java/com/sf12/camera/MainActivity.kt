@@ -358,6 +358,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onPause() {
         activityResumed = false
+        focusLocked = false
+        if (::focusIndicator.isInitialized) {
+            mainHandler.removeCallbacks(hideFocusIndicatorRunnable)
+            focusIndicator.animate().cancel()
+            focusIndicator.visibility = View.GONE
+            focusIndicator.alpha = 1f
+        }
         mainHandler.removeCallbacks(timerRunnable)
         capturePending = false
         hideTimerCountdown()
@@ -4162,10 +4169,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val canMeterFocus = focusMeteringRegion != null &&
             (cameraCharacteristics?.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
         return when {
-            canMeterFocus && supported.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) ->
+            focusLocked && canMeterFocus &&
+                supported.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) ->
                 CaptureRequest.CONTROL_AF_MODE_AUTO
             supported.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE) ->
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            canMeterFocus && supported.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) ->
+                CaptureRequest.CONTROL_AF_MODE_AUTO
             supported.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) ->
                 CaptureRequest.CONTROL_AF_MODE_AUTO
             else -> CaptureRequest.CONTROL_AF_MODE_OFF
