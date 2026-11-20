@@ -233,6 +233,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraOpenGeneration = 0L
     private var capturePending = false
     private var timerDeadlineRealtimeMs = 0L
+    private var flashFocusAssistInProgress = false
+    private var flashFocusAssistGeneration = 0L
+    private var flashFocusAssistTimeout: Runnable? = null
 
     private val permissionRequestCode = 710
     private val galleryPermissionRequestCode = 711
@@ -355,6 +358,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         mainHandler.removeCallbacks(timerRunnable)
         capturePending = false
         hideTimerCountdown()
+        cancelFlashFocusAssist()
         dismissCaptureOverlay(animate = false)
         closeCamera()
         stopCameraThread()
@@ -2431,7 +2435,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun onShutterPressed() {
         if (activeTab != "Basic" || activeMode !in listOf("Photo", "Portrait")) return
-        if (capturePending) return
+        if (capturePending || flashFocusAssistInProgress) return
         val delay = timerSeconds
         if (delay > 0) {
             capturePending = true
@@ -2449,7 +2453,146 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    /**
+     * A short torch-assisted AF pass mirrors the focus-assist behaviour of
+     * Samsung Camera: illuminate the scene while autofocus settles, then turn
+     * the torch off and take the photo with the selected flash mode.
+     */
     private fun captureStillPhoto() {
+        if (
+            flashMode == 1 &&
+            lensFacing == CameraCharacteristics.LENS_FACING_BACK &&
+            isFlashAvailable() &&
+            currentAfMode() != CaptureRequest.CONTROL_AF_MODE_OFF
+        ) {
+            beginFlashFocusAssist()
+            return
+        }
+        captureStillPhotoNow()
+    }
+
+    private fun beginFlashFocusAssist() {
+        if (flashFocusAssistInProgress) return
+        val device = cameraDevice
+        val session = captureSession
+        val surface = previewSurface
+        if (device == null || session == null || surface == null) {
+            captureStillPhotoNow()
+            return
+        }
+
+        val supportedAfModes = cameraCharacteristics
+            ?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+            ?.toSet()
+            .orEmpty()
+        val focusMode = when {
+            CaptureRequest.CONTROL_AF_MODE_AUTO in supportedAfModes ->
+                CaptureRequest.CONTROL_AF_MODE_AUTO
+            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE in supportedAfModes ->
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            else -> {
+                captureStillPhotoNow()
+                return
+            }
+        }
+
+        flashFocusAssistInProgress = true
+        val generation = ++flashFocusAssistGeneration
+        val monitorRequest = try {
+            device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(surface)
+                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AF_MODE, focusMode)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                applyFocusRegions(this)
+                applyFilter(this)
+                applyZoom(this)
+            }
+        } catch (_: Exception) {
+            finishFlashFocusAssist(generation)
+            return
+        }
+
+        val triggerRequest = try {
+            device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(surface)
+                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AF_MODE, focusMode)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                applyFocusRegions(this)
+                applyFilter(this)
+                applyZoom(this)
+            }
+        } catch (_: Exception) {
+            finishFlashFocusAssist(generation)
+            return
+        }
+
+        val timeout = Runnable { finishFlashFocusAssist(generation) }
+        flashFocusAssistTimeout = timeout
+        mainHandler.postDelayed(timeout, 2_000L)
+
+        try {
+            session.setRepeatingRequest(
+                monitorRequest.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: android.hardware.camera2.TotalCaptureResult
+                    ) {
+                        if (!flashFocusAssistInProgress ||
+                            generation != flashFocusAssistGeneration
+                        ) return
+                        val afState = result.get(
+                            android.hardware.camera2.CaptureResult.CONTROL_AF_STATE
+                        )
+                        if (
+                            afState == android.hardware.camera2.CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
+                            afState == android.hardware.camera2.CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
+                        ) {
+                            mainHandler.post { finishFlashFocusAssist(generation) }
+                        }
+                    }
+                },
+                cameraHandler
+            )
+            // Send AF_TRIGGER_START once; the repeating request above keeps the
+            // torch on while the sensor reports its focus state.
+            session.capture(triggerRequest.build(), null, cameraHandler)
+        } catch (_: Exception) {
+            finishFlashFocusAssist(generation)
+        }
+    }
+
+    private fun finishFlashFocusAssist(generation: Long) {
+        if (!flashFocusAssistInProgress ||
+            generation != flashFocusAssistGeneration
+        ) return
+        flashFocusAssistInProgress = false
+        flashFocusAssistTimeout?.let { mainHandler.removeCallbacks(it) }
+        flashFocusAssistTimeout = null
+
+        // Replacing the repeating request removes TORCH before the still
+        // request uses FLASH_MODE_SINGLE for the actual exposure.
+        startPreviewRepeating()
+        captureStillPhotoNow()
+    }
+
+    private fun cancelFlashFocusAssist() {
+        flashFocusAssistGeneration++
+        flashFocusAssistInProgress = false
+        flashFocusAssistTimeout?.let { mainHandler.removeCallbacks(it) }
+        flashFocusAssistTimeout = null
+    }
+
+    private fun captureStillPhotoNow() {
         capturePending = false
         hideTimerCountdown()
         if (pendingStillCapture != null || portraitProcessing) {
@@ -4301,6 +4444,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun closeCamera() {
+        cancelFlashFocusAssist()
         // Invalidate callbacks from an earlier open attempt before releasing
         // resources. Gallery/app switching can deliver onOpened after onPause.
         cameraOpenGeneration++
