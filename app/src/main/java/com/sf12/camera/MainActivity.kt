@@ -84,6 +84,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var statusHint: TextView
     private var captureOverlay: FrameLayout? = null
     private var captureHiddenViewStates: List<Pair<View, Int>>? = null
+    private var captureFrozenPreview: Bitmap? = null
+    private var captureFrozenPreviewView: ImageView? = null
 
     private lateinit var settingsButton: CameraIconButton
     private lateinit var flashButton: CameraIconButton
@@ -146,6 +148,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var selectedEffectMode = CaptureRequest.CONTROL_EFFECT_MODE_OFF
     private var expandedOptionsKind: String? = null
     private var gestureHadMultiplePointers = false
+    private var gestureStartedInPreviewArea = false
     private var primaryModes = mutableListOf("Portrait", "Photo", "Video", "More")
     private var moreModes = mutableListOf(
         "Single Take", "Night", "Food", "Panorama",
@@ -641,16 +644,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         gestureDetector = GestureDetector(
             this,
             object : GestureDetector.SimpleOnGestureListener() {
-                override fun onDown(event: MotionEvent): Boolean = true
+                override fun onDown(event: MotionEvent): Boolean {
+                    gestureStartedInPreviewArea = isPreviewGesturePoint(event.x, event.y)
+                    return gestureStartedInPreviewArea
+                }
 
                 override fun onSingleTapUp(event: MotionEvent): Boolean {
-                    if (gestureHadMultiplePointers || event.pointerCount > 1) return false
+                    if (!gestureStartedInPreviewArea ||
+                        !isPreviewGesturePoint(event.x, event.y) ||
+                        gestureHadMultiplePointers || event.pointerCount > 1
+                    ) return false
                     focusAtPoint(event.x, event.y)
                     return true
                 }
 
                 override fun onLongPress(event: MotionEvent) {
-                    if (!gestureHadMultiplePointers && activeMode == "Portrait") {
+                    if (gestureStartedInPreviewArea &&
+                        isPreviewGesturePoint(event.x, event.y) &&
+                        !gestureHadMultiplePointers &&
+                        activeMode == "Portrait"
+                    ) {
                         focusAtPoint(event.x, event.y, addPortraitSubject = true)
                     }
                 }
@@ -661,7 +674,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     velocityX: Float,
                     velocityY: Float
                 ): Boolean {
-                    if (first == null || gestureHadMultiplePointers ||
+                    if (first == null || !gestureStartedInPreviewArea ||
+                        !isPreviewGesturePoint(first.x, first.y) ||
+                        !isPreviewGesturePoint(last.x, last.y) ||
+                        gestureHadMultiplePointers ||
                         first.pointerCount > 1 || last.pointerCount > 1
                     ) return false
 
@@ -699,6 +715,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 event.actionMasked == MotionEvent.ACTION_CANCEL
             ) {
                 gestureHadMultiplePointers = false
+                gestureStartedInPreviewArea = false
             }
             true
         }
@@ -2138,7 +2155,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
-    private fun showCaptureOverlay() {
+    private fun showCaptureOverlay(frozenFrame: Bitmap? = null) {
         if (!::root.isInitialized || captureOverlay != null) return
 
         // Keep only the TextureView visible so the live viewfinder remains clear.
@@ -2159,6 +2176,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             elevation = dp(100).toFloat()
             alpha = 0f
             contentDescription = "Capturing image"
+        }
+
+        if (frozenFrame != null && !frozenFrame.isRecycled) {
+            captureFrozenPreview = frozenFrame
+            captureFrozenPreviewView = ImageView(this).apply {
+                setImageBitmap(frozenFrame)
+                scaleType = ImageView.ScaleType.FIT_XY
+                isClickable = false
+                contentDescription = "Frozen camera preview"
+            }
+            overlay.addView(
+                captureFrozenPreviewView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
         }
 
         val message = TextView(this).apply {
@@ -2215,6 +2249,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         val restoreUi = {
             if (overlay.parent === root) root.removeView(overlay)
+            captureFrozenPreviewView?.setImageDrawable(null)
+            captureFrozenPreviewView = null
+            captureFrozenPreview?.let { bitmap ->
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
+            captureFrozenPreview = null
             captureHiddenViewStates?.forEach { (view, visibility) ->
                 if (view.parent === root) view.visibility = visibility
             }
@@ -2280,7 +2320,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         )
         pendingStillCapture = ticket
-        showCaptureOverlay()
+        val frozenPreview = if (portraitCapture) {
+            runCatching { previewView.bitmap }.getOrNull()
+        } else {
+            null
+        }
+        showCaptureOverlay(frozenPreview)
+        if (portraitCapture) {
+            // Keep the TextureView on the last displayed frame while Portrait
+            // segmentation runs; the still capture request is submitted next.
+            try {
+                session.stopRepeating()
+            } catch (_: CameraAccessException) {
+                // The frozen bitmap above still provides the visual hold.
+            }
+        }
         cancelCaptureTimeout()
         val timeout = Runnable {
             if (pendingStillCapture?.id == captureId) {
@@ -2317,7 +2371,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     request: CaptureRequest,
                     result: android.hardware.camera2.TotalCaptureResult
                 ) {
-                    startPreviewRepeating()
+                    if (!portraitCapture) startPreviewRepeating()
                 }
 
                 override fun onCaptureFailed(
@@ -2362,6 +2416,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         pendingStillCapture = null
         cancelCaptureTimeout()
         runOnUiThread {
+            startPreviewRepeating()
             dismissCaptureOverlay()
             Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
         }
@@ -2571,6 +2626,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         )
     }
 
+    private fun isPreviewGesturePoint(x: Float, y: Float): Boolean {
+        if (!::previewView.isInitialized ||
+            x < 0f || y < 0f ||
+            x > previewView.width.toFloat() ||
+            y > previewView.height.toFloat()
+        ) return false
+
+        // The TextureView fills the screen, but the visible camera interaction
+        // area excludes the top controls and the complete bottom control stack.
+        val topBoundary = if (::topPanel.isInitialized && topPanel.visibility == View.VISIBLE) {
+            topPanel.bottom.toFloat()
+        } else {
+            0f
+        }
+        val bottomBoundary = if (
+            ::bottomPanel.isInitialized && bottomPanel.visibility == View.VISIBLE
+        ) {
+            bottomPanel.top.toFloat()
+        } else {
+            previewView.height.toFloat()
+        }
+        return y >= topBoundary && y <= bottomBoundary
+    }
+
     private fun zoomBounds(): Pair<Float, Float> {
         val characteristics = cameraCharacteristics ?: return 1f to 1f
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -2601,9 +2680,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        if (minZoom < 0.98f) addLevel(minZoom)
-        listOf(0.5f, 0.9f, 1f, 2f, 4f, 8f).forEach { addLevel(it) }
-        if (levels.none { abs(it - maxZoom) < 0.02f }) addLevel(maxZoom)
+        // Ultra-wide ratios are exposed in 0.1× steps when the camera reports
+        // support below 1×. Main/telephoto zoom uses every whole 1× step.
+        if (minZoom < 1f) {
+            addLevel(minZoom)
+            var tenthStep = kotlin.math.ceil(minZoom * 10f - 0.001f).toInt()
+            while (tenthStep < 10) {
+                addLevel(tenthStep / 10f)
+                tenthStep++
+            }
+        }
+        addLevel(1f)
+        var wholeZoom = 2f
+        while (wholeZoom <= maxZoom + 0.001f) {
+            addLevel(wholeZoom)
+            wholeZoom += 1f
+        }
+        if (maxZoom > 1f && levels.none { abs(it - maxZoom) < 0.02f }) {
+            addLevel(maxZoom)
+        }
         if (levels.isEmpty()) addLevel(1f)
         zoomLevels = levels.sorted()
         zoomRatio = zoomRatio.coerceIn(minZoom, maxZoom)
@@ -3157,6 +3252,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             portraitProcessing = false
                             mainHandler.post {
                                 savedPhotoUri?.let { showGalleryThumbnail(it) }
+                                startPreviewRepeating()
                                 dismissCaptureOverlay()
                                 completionMessage?.let { message ->
                                     Toast.makeText(
