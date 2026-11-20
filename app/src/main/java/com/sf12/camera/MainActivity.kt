@@ -4838,7 +4838,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ).apply {
             color = 0x66FFFFFF
             style = android.graphics.Paint.Style.STROKE
-            strokeWidth = dp(1f)
+            strokeWidth = dp(1f).toFloat()
             strokeCap = android.graphics.Paint.Cap.ROUND
         }
         private val tickPaint = android.graphics.Paint(
@@ -4854,7 +4854,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ).apply {
             color = 0xFFFFD54F.toInt()
             style = android.graphics.Paint.Style.STROKE
-            strokeWidth = dp(2f)
+            strokeWidth = dp(2f).toFloat()
             strokeCap = android.graphics.Paint.Cap.ROUND
         }
         private val centreDotPaint = android.graphics.Paint(
@@ -4920,7 +4920,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val distance = kotlin.math.abs(x - centreX) / (width / 2f)
                 tickPaint.alpha = (235f * (1f - distance * 0.42f))
                     .toInt().coerceIn(80, 235)
-                tickPaint.strokeWidth = if (isMajor) dp(1.35f) else dp(1f)
+                tickPaint.strokeWidth = (if (isMajor) dp(1.35f) else dp(1f)).toFloat()
                 canvas.drawLine(
                     x,
                     baselineY - tickHeight,
@@ -4933,15 +4933,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             // Fixed centre hairline and dot make the moving ticks read as a dial.
             canvas.drawLine(
                 centreX,
-                dp(1f),
+                dp(1f).toFloat(),
                 centreX,
-                baselineY + dp(1f),
+                baselineY + dp(1f).toFloat(),
                 centrePaint
             )
             canvas.drawCircle(
                 centreX,
-                dp(2f),
-                dp(2f),
+                dp(2f).toFloat(),
+                dp(2f).toFloat(),
                 centreDotPaint
             )
         }
