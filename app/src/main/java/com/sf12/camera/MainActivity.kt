@@ -2837,6 +2837,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         // Ultra-wide ratios are exposed in 0.1× steps when the camera reports
         // support below 1×. Main/telephoto zoom uses every whole 1× step.
         if (minZoom < 1f) {
+            // Keep the true lens hand-off point, rounded for display, then expose
+            // the remaining ultra-wide stops in 0.1× increments.
+            addLevel(minZoom)
             var tenthStep = kotlin.math.ceil(minZoom * 10f - 0.001f).toInt()
             while (tenthStep < 10) {
                 addLevel(tenthStep / 10f)
