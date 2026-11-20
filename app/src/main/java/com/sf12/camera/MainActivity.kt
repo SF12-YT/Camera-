@@ -28,6 +28,7 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.graphics.ImageFormat
 import android.media.ImageReader
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -112,6 +113,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var filterButton: CameraIconButton
     private lateinit var galleryThumbnail: ImageView
     private lateinit var galleryPlaceholder: CameraIconButton
+    private lateinit var galleryVideoBadge: TextView
     private lateinit var shutterButton: FrameLayout
     private lateinit var modeLabels: Map<String, TextView>
     private lateinit var scaleGestureDetector: ScaleGestureDetector
@@ -124,6 +126,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var cameraId: String? = null
     private var focusMeteringRegion: MeteringRectangle? = null
+    private var focusLocked = false
     private data class PhysicalLensInfo(
         val id: String,
         val characteristics: CameraCharacteristics,
@@ -162,7 +165,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
     private val hideFocusIndicatorRunnable = Runnable {
-        if (::focusIndicator.isInitialized) {
+        if (::focusIndicator.isInitialized && !focusLocked) {
             focusIndicator.animate()
                 .alpha(0f)
                 .setDuration(220L)
@@ -381,7 +384,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
         focusIndicator = View(this).apply {
-            background = rounded(Color.TRANSPARENT, 9, 0xFFFFD54F.toInt())
+            background = rounded(Color.TRANSPARENT, 9, Color.WHITE)
             visibility = View.GONE
             alpha = 1f
             contentDescription = "Focus point"
@@ -674,13 +677,36 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
         )
         galleryPlaceholder = CameraIconButton(this, "gallery") { }.apply {
-            contentDescription = "Most recent camera photo"
+            contentDescription = "Most recent camera media"
             isClickable = false
             isFocusable = false
         }
         gallerySlot.addView(
             galleryPlaceholder,
             FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
+        )
+        galleryVideoBadge = TextView(this).apply {
+            text = "▶"
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 9f
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            background = oval(0xDD101010.toInt())
+            elevation = dp(4).toFloat()
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+            contentDescription = "Video"
+        }
+        gallerySlot.addView(
+            galleryVideoBadge,
+            FrameLayout.LayoutParams(dp(20), dp(20), Gravity.BOTTOM or Gravity.END).apply {
+                rightMargin = dp(1)
+                bottomMargin = dp(1)
+            }
         )
         shutterRow.addView(gallerySlot, LinearLayout.LayoutParams(0, dp(82), 1f))
 
@@ -802,10 +828,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 override fun onLongPress(event: MotionEvent) {
                     if (gestureStartedInPreviewArea &&
                         isPreviewGesturePoint(event.x, event.y) &&
-                        !gestureHadMultiplePointers &&
-                        activeMode == "Portrait"
+                        !gestureHadMultiplePointers && event.pointerCount == 1
                     ) {
-                        focusAtPoint(event.x, event.y, addPortraitSubject = true)
+                        // Match Samsung Camera: a tap sets a focus point; a hold locks it.
+                        focusAtPoint(
+                            event.x,
+                            event.y,
+                            addPortraitSubject = activeMode == "Portrait",
+                            lockFocus = true
+                        )
                     }
                 }
 
@@ -3383,21 +3414,41 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (!routeChanged) startPreviewRepeating()
     }
 
-    private fun showGalleryThumbnail(uri: Uri) {
+    private fun showGalleryThumbnail(item: CameraGalleryItem, videoFrame: Bitmap?) {
         if (!::galleryThumbnail.isInitialized) return
-        galleryThumbnail.setImageURI(uri)
+        val isVideo = item.mimeType.startsWith("video/")
+        if (isVideo) {
+            if (videoFrame != null) {
+                galleryThumbnail.setImageBitmap(videoFrame)
+            } else {
+                galleryThumbnail.setImageDrawable(textDrawablePlaceholder())
+            }
+            galleryVideoBadge.visibility = View.VISIBLE
+            galleryThumbnail.contentDescription = "Most recent video"
+        } else {
+            galleryThumbnail.setImageURI(item.uri)
+            galleryVideoBadge.visibility = View.GONE
+            galleryThumbnail.contentDescription = "Most recent photo"
+        }
         galleryPlaceholder.visibility = View.GONE
     }
 
     private fun loadLatestCameraThumbnail() {
         Thread {
-            val latestUri = findLatestCameraPhotoUri()
+            val latestItem = findLatestCameraGalleryItem()
+            val videoFrame = if (latestItem?.mimeType?.startsWith("video/") == true) {
+                createVideoThumbnail(latestItem.uri)
+            } else {
+                null
+            }
             mainHandler.post {
                 if (!isFinishing && ::galleryThumbnail.isInitialized) {
-                    if (latestUri != null) {
-                        showGalleryThumbnail(latestUri)
+                    if (latestItem != null) {
+                        showGalleryThumbnail(latestItem, videoFrame)
                     } else {
                         galleryThumbnail.setImageDrawable(textDrawablePlaceholder())
+                        galleryThumbnail.contentDescription = "No recent camera media"
+                        galleryVideoBadge.visibility = View.GONE
                         galleryPlaceholder.visibility = View.VISIBLE
                     }
                 }
@@ -3405,51 +3456,28 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }.start()
     }
 
-    private fun findLatestCameraPhotoUri(): Uri? {
-        return try {
-            val storage = selectedCameraStorageLocation() ?: return null
-            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                MediaStore.Images.Media.getContentUri(storage.volumeName)
-            } else {
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+    private fun createVideoThumbnail(uri: Uri): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                return contentResolver.loadThumbnail(uri, Size(dp(160), dp(160)), null)
+            } catch (_: Exception) {
+                // Fall back to MediaMetadataRetriever for providers that do not
+                // implement ContentResolver.loadThumbnail for video items.
             }
-            val projection = arrayOf(MediaStore.Images.Media._ID)
-            val selection: String
-            val selectionArgs: Array<String>
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                selection = "(${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
-                    "${MediaStore.Images.Media.RELATIVE_PATH} = ? OR " +
-                    "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)"
-                selectionArgs = arrayOf(
-                    Environment.DIRECTORY_DCIM + "/Camera",
-                    Environment.DIRECTORY_DCIM + "/Camera/",
-                    Environment.DIRECTORY_DCIM + "/Camera/%"
-                )
-            } else {
-                selection = "${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?"
-                selectionArgs = arrayOf("Camera")
-            }
+        }
 
-            contentResolver.query(
-                collection,
-                projection,
-                selection,
-                selectionArgs,
-                "${MediaStore.Images.Media.DATE_TAKEN} DESC, " +
-                    "${MediaStore.Images.Media.DATE_ADDED} DESC, " +
-                    "${MediaStore.Images.Media._ID} DESC"
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(
-                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    )
-                    ContentUris.withAppendedId(collection, id)
-                } else {
-                    null
-                }
-            }
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(this, uri)
+            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         } catch (_: Exception) {
             null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+                // Nothing else to release if the provider failed to open.
+            }
         }
     }
 
@@ -4205,8 +4233,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return Rect(left, top, left + cropWidth, top + cropHeight)
     }
 
-    private fun showFocusIndicator(x: Float, y: Float) {
+    private fun showFocusIndicator(x: Float, y: Float, locked: Boolean) {
         if (!::focusIndicator.isInitialized) return
+        focusLocked = locked
+        focusIndicator.background = rounded(
+            Color.TRANSPARENT,
+            9,
+            if (locked) 0xFFFFD54F.toInt() else Color.WHITE
+        )
+        focusIndicator.contentDescription = if (locked) {
+            "Focus locked"
+        } else {
+            "Focus point"
+        }
         val size = dp(72).toFloat()
         focusIndicator.animate().cancel()
         focusIndicator.visibility = View.VISIBLE
@@ -4226,13 +4265,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             .setDuration(150L)
             .start()
         mainHandler.removeCallbacks(hideFocusIndicatorRunnable)
-        mainHandler.postDelayed(hideFocusIndicatorRunnable, 1_000L)
+        if (!locked) {
+            mainHandler.postDelayed(hideFocusIndicatorRunnable, 1_000L)
+        }
     }
 
     private fun focusAtPoint(
         viewX: Float,
         viewY: Float,
-        addPortraitSubject: Boolean = false
+        addPortraitSubject: Boolean = false,
+        lockFocus: Boolean = false
     ) {
         val characteristics = cameraCharacteristics ?: return
         val activeLensCharacteristics = if (activePhysicalCameraId != null) {
@@ -4306,7 +4348,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }
         }
-        showFocusIndicator(viewX, viewY)
+        showFocusIndicator(viewX, viewY, lockFocus)
 
         val session = captureSession ?: return
         val cancel = createPreviewRequest(CaptureRequest.CONTROL_AF_TRIGGER_CANCEL) ?: return
