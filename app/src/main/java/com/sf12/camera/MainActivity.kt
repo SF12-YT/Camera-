@@ -229,6 +229,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     )
     @Volatile private var cameraCapabilityReport = "Open the camera preview to generate a hardware capability report."
     private var openingCamera = false
+    private var activityResumed = false
+    private var cameraOpenGeneration = 0L
     private var capturePending = false
     private var timerDeadlineRealtimeMs = 0L
 
@@ -301,12 +303,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     override fun onResume() {
         super.onResume()
+        activityResumed = true
         startCameraThread()
         if (::galleryThumbnail.isInitialized && hasGalleryReadPermission()) {
             loadLatestCameraThumbnail()
         }
         if (hasCameraPermission()) {
-            if (previewView.isAvailable) openCamera()
+            // Wait until Android has restored the view's final dimensions before
+            // reopening Camera2 and rebuilding the TextureView transform.
+            previewView.post {
+                if (!activityResumed || !previewView.isAvailable) return@post
+                configurePreviewTransform(previewView.width, previewView.height)
+                openCamera()
+            }
             if (hasGalleryReadPermission()) {
                 if (::galleryThumbnail.isInitialized) loadLatestCameraThumbnail()
             } else {
@@ -342,6 +351,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onPause() {
+        activityResumed = false
         mainHandler.removeCallbacks(timerRunnable)
         capturePending = false
         hideTimerCountdown()
@@ -2744,32 +2754,51 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun setFlashForRequest(builder: CaptureRequest.Builder) {
         val characteristics = cameraCharacteristics
-        if (characteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) != true) {
+        val flashAvailable =
+            characteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        if (!flashAvailable || lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             return
         }
 
         val supportedAeModes = characteristics
-            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
+            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
             ?.toSet()
             .orEmpty()
-        val requestedAeMode = when (flashMode) {
-            0 -> CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
-            1 -> CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
-            else -> CaptureRequest.CONTROL_AE_MODE_ON
+        val aeOn = if (CaptureRequest.CONTROL_AE_MODE_ON in supportedAeModes) {
+            CaptureRequest.CONTROL_AE_MODE_ON
+        } else {
+            supportedAeModes.firstOrNull() ?: CaptureRequest.CONTROL_AE_MODE_ON
         }
-        val aeMode = when {
-            requestedAeMode in supportedAeModes -> requestedAeMode
-            flashMode != 2 &&
-                CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH in supportedAeModes ->
-                CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
-            CaptureRequest.CONTROL_AE_MODE_ON in supportedAeModes ->
-                CaptureRequest.CONTROL_AE_MODE_ON
-            else -> supportedAeModes.firstOrNull() ?: CaptureRequest.CONTROL_AE_MODE_ON
+
+        when (flashMode) {
+            1 -> {
+                // Samsung's Camera2 HAL can ignore ON_ALWAYS_FLASH on some
+                // devices. Use the explicit single-flash request with AE enabled.
+                // FLASH_MODE_SINGLE is valid with CONTROL_AE_MODE_ON.
+                builder.set(CaptureRequest.CONTROL_AE_MODE, aeOn)
+                builder.set(
+                    CaptureRequest.FLASH_MODE,
+                    CaptureRequest.FLASH_MODE_SINGLE
+                )
+            }
+            0 -> {
+                val autoMode = when {
+                    CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH in supportedAeModes ->
+                        CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                    CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH in supportedAeModes ->
+                        CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                    else -> aeOn
+                }
+                builder.set(CaptureRequest.CONTROL_AE_MODE, autoMode)
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
+            else -> {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, aeOn)
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
         }
-        // Auto/always flash must be selected through AE so the camera can meter
-        // the scene and fire the strobe at the correct point in the exposure.
-        builder.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
     }
 
     private fun applyZoom(builder: CaptureRequest.Builder) {
@@ -3597,7 +3626,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun openCamera() {
-        if (openingCamera || cameraDevice != null || !hasCameraPermission()) return
+        if (!activityResumed || openingCamera || cameraDevice != null || !hasCameraPermission()) return
         if (cameraHandler == null) startCameraThread()
         val id = cameraId ?: findCameraId(lensFacing)
         if (id == null) {
@@ -3606,9 +3635,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         cameraId = id
         openingCamera = true
+        val openGeneration = ++cameraOpenGeneration
         try {
             cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
+                    if (openGeneration != cameraOpenGeneration || !activityResumed) {
+                        camera.close()
+                        return
+                    }
                     openingCamera = false
                     cameraDevice = camera
                     cameraCharacteristics = cameraManager.getCameraCharacteristics(id)
@@ -3639,8 +3673,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
-                    openingCamera = false
                     camera.close()
+                    if (openGeneration != cameraOpenGeneration) return
+                    openingCamera = false
                     if (cameraDevice === camera) cameraDevice = null
                     if (usingStandaloneUltraWideCamera) {
                         runOnUiThread {
@@ -3652,8 +3687,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
-                    openingCamera = false
                     camera.close()
+                    if (openGeneration != cameraOpenGeneration) return
+                    openingCamera = false
                     if (cameraDevice === camera) cameraDevice = null
                     runOnUiThread {
                         if (usingStandaloneUltraWideCamera) {
@@ -3671,7 +3707,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }, cameraHandler)
         } catch (e: CameraAccessException) {
-            openingCamera = false
+            if (openGeneration == cameraOpenGeneration) openingCamera = false
             if (usingStandaloneUltraWideCamera) {
                 fallbackFromStandaloneUltraWideCamera(
                     "The ultra-wide camera could not be accessed: ${e.reason}."
@@ -3680,7 +3716,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 Toast.makeText(this, "Unable to open camera: ${e.reason}", Toast.LENGTH_LONG).show()
             }
         } catch (e: SecurityException) {
-            openingCamera = false
+            if (openGeneration == cameraOpenGeneration) openingCamera = false
             if (usingStandaloneUltraWideCamera) {
                 fallbackFromStandaloneUltraWideCamera(
                     "The ultra-wide camera is not accessible to this app."
@@ -3877,6 +3913,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         return
                     }
                     captureSession = session
+                    previewView.post {
+                        if (cameraDevice === device && previewView.isAvailable) {
+                            configurePreviewTransform(previewView.width, previewView.height)
+                        }
+                    }
                     startPreviewRepeating()
                 }
 
@@ -4260,19 +4301,40 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun closeCamera() {
+        // Invalidate callbacks from an earlier open attempt before releasing
+        // resources. Gallery/app switching can deliver onOpened after onPause.
+        cameraOpenGeneration++
+        openingCamera = false
+
         try {
             captureSession?.close()
-            captureSession = null
-            previewSurface?.release()
-            previewSurface = null
-            cameraDevice?.close()
-            cameraDevice = null
-            imageReader?.close()
-            imageReader = null
         } catch (_: Exception) {
             // Camera resources are already being released.
         }
-        openingCamera = false
+        captureSession = null
+
+        try {
+            previewSurface?.release()
+        } catch (_: Exception) {
+            // Surface may already have been released with its TextureView.
+        }
+        previewSurface = null
+
+        try {
+            cameraDevice?.close()
+        } catch (_: Exception) {
+            // Camera device may already be closed.
+        }
+        cameraDevice = null
+        cameraCharacteristics = null
+
+        try {
+            imageReader?.close()
+        } catch (_: Exception) {
+            // ImageReader may already be closed.
+        }
+        imageReader = null
+        previewSize = null
     }
 
     private fun hasCameraPermission(): Boolean {
@@ -4340,11 +4402,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        if (hasCameraPermission()) openCamera()
+        previewView.post {
+            if (activityResumed && hasCameraPermission()) {
+                configurePreviewTransform(width, height)
+                openCamera()
+            }
+        }
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        configurePreviewTransform(width, height)
+        previewView.post {
+            if (activityResumed) configurePreviewTransform(width, height)
+        }
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
