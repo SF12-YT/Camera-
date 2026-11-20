@@ -82,6 +82,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var quickControls: LinearLayout
     private lateinit var zoomRow: HorizontalScrollView
     private lateinit var zoomChipsRow: LinearLayout
+    private lateinit var zoomRuler: ZoomRulerView
+    private var zoomChipSelectedIndex = -1
     private lateinit var modeScroll: HorizontalScrollView
     private lateinit var modeRow: LinearLayout
     private lateinit var shutterRow: LinearLayout
@@ -463,6 +465,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         bottomPanel.addView(zoomRow, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(56)
         ))
+        zoomRuler = ZoomRulerView(this).apply {
+            visibility = View.GONE
+            contentDescription = "Continuous zoom scale"
+        }
+        bottomPanel.addView(
+            zoomRuler,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(25)
+            ).apply {
+                bottomMargin = dp(5)
+            }
+        )
 
         modeScroll = object : HorizontalScrollView(this) {
             private var gestureStartX = 0f
@@ -667,10 +682,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     val bounds = zoomBounds()
                     val nextZoom = (zoomRatio * detector.scaleFactor)
                         .coerceIn(bounds.first, bounds.second)
-                    if (abs(nextZoom - zoomRatio) > 0.002f) {
+                    if (abs(nextZoom - zoomRatio) > 0.0005f) {
                         zoomRatio = nextZoom
                         val routeChanged = updateZoomCameraRoute()
                         if (!routeChanged) startPreviewRepeating()
+                        refreshZoomFeedback()
                     }
                     return true
                 }
@@ -787,6 +803,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val basic = name == "Basic"
         quickControls.visibility = View.VISIBLE
         zoomRow.visibility = if (basic) View.VISIBLE else View.INVISIBLE
+        zoomRuler.visibility = if (basic && zoomOptionsExpanded) View.VISIBLE else View.GONE
         modeScroll.visibility = if (basic) View.VISIBLE else View.INVISIBLE
         shutterRow.visibility = if (basic) View.VISIBLE else View.INVISIBLE
         statusHint.visibility = if (basic) View.GONE else View.VISIBLE
@@ -2969,6 +2986,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val selectedIndex = visibleLevels.indices.minByOrNull {
             abs(zoomRatio - visibleLevels[it])
         } ?: 0
+        zoomChipSelectedIndex = selectedIndex
         visibleLevels.forEachIndexed { index, level ->
             val selected = index == selectedIndex
             val label = "${String.format(Locale.US, "%.1f", level)}×"
@@ -2998,6 +3016,43 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 selectedChip.left + selectedChip.width / 2 - zoomRow.width / 2
             ).coerceAtLeast(0)
             zoomRow.smoothScrollTo(targetScroll, 0)
+        }
+        refreshZoomFeedback()
+    }
+
+    private fun refreshZoomFeedback() {
+        if (::zoomRuler.isInitialized) {
+            val bounds = zoomBounds()
+            zoomRuler.updateZoom(
+                zoomRatio,
+                bounds.first,
+                bounds.second
+            )
+            zoomRuler.visibility = if (
+                activeTab == "Basic" && zoomOptionsExpanded
+            ) View.VISIBLE else View.GONE
+        }
+
+        if (!::zoomChipsRow.isInitialized) return
+        val visibleLevels = if (zoomOptionsExpanded) zoomLevels else listOf(1f)
+        if (visibleLevels.isEmpty()) return
+        val selectedIndex = visibleLevels.indices.minByOrNull {
+            abs(zoomRatio - visibleLevels[it])
+        } ?: 0
+        if (selectedIndex == zoomChipSelectedIndex) return
+
+        zoomChipSelectedIndex = selectedIndex
+        for (index in 0 until zoomChipsRow.childCount) {
+            val chip = zoomChipsRow.getChildAt(index) as? TextView ?: continue
+            val selected = index == selectedIndex
+            chip.setTextColor(if (selected) Color.BLACK else Color.WHITE)
+            chip.background = if (selected) oval(Color.WHITE) else null
+            val params = chip.layoutParams as? LinearLayout.LayoutParams ?: continue
+            val targetSize = if (selected) dp(44) else dp(38)
+            if (params.width != targetSize) {
+                params.width = targetSize
+                chip.layoutParams = params
+            }
         }
     }
 
@@ -4764,6 +4819,131 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 lineTo(20f, 17.8f)
             }
             canvas.drawPath(mountain, p)
+        }
+    }
+
+    /**
+     * A continuous horizontal zoom ruler. Tick marks slide beneath a fixed
+     * centre indicator, like a flat mechanical dial, without rebuilding views
+     * during a pinch gesture.
+     */
+    private inner class ZoomRulerView(context: Context) : View(context) {
+        private val density = resources.displayMetrics.density
+        private var currentZoom = 1f
+        private var minimumZoom = 1f
+        private var maximumZoom = 10f
+
+        private val baselinePaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = 0x66FFFFFF
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = dp(1f)
+            strokeCap = android.graphics.Paint.Cap.ROUND
+        }
+        private val tickPaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = Color.WHITE
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = dp(1f)
+            strokeCap = android.graphics.Paint.Cap.ROUND
+        }
+        private val centrePaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = 0xFFFFD54F.toInt()
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = dp(2f)
+            strokeCap = android.graphics.Paint.Cap.ROUND
+        }
+        private val centreDotPaint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = 0xFFFFD54F.toInt()
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        fun updateZoom(value: Float, min: Float, max: Float) {
+            val safeMin = min.coerceAtLeast(0.1f)
+            val safeMax = max.coerceAtLeast(safeMin)
+            if (
+                kotlin.math.abs(currentZoom - value) < 0.0001f &&
+                kotlin.math.abs(minimumZoom - safeMin) < 0.0001f &&
+                kotlin.math.abs(maximumZoom - safeMax) < 0.0001f
+            ) return
+            currentZoom = value.coerceIn(safeMin, safeMax)
+            minimumZoom = safeMin
+            maximumZoom = safeMax
+            invalidate()
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            if (width <= 0 || height <= 0) return
+
+            val centreX = width / 2f
+            val baselineY = height - dp(3f)
+            val pixelsPerZoom = dp(62f).toFloat()
+            val halfRange = width / (2f * pixelsPerZoom)
+            val firstValue = maxOf(
+                minimumZoom,
+                currentZoom - halfRange
+            )
+            val lastValue = minOf(
+                maximumZoom,
+                currentZoom + halfRange
+            )
+            val firstTick = kotlin.math.ceil(firstValue * 10f - 0.0001f).toInt()
+            val lastTick = kotlin.math.floor(lastValue * 10f + 0.0001f).toInt()
+
+            canvas.drawLine(
+                0f,
+                baselineY,
+                width.toFloat(),
+                baselineY,
+                baselinePaint
+            )
+
+            for (tickIndex in firstTick..lastTick) {
+                val tickValue = tickIndex / 10f
+                val x = centreX + (tickValue - currentZoom) * pixelsPerZoom
+                if (x < 0f || x > width.toFloat()) continue
+
+                val isMajor = tickIndex % 10 == 0
+                val isHalf = tickIndex % 5 == 0
+                val tickHeight = when {
+                    isMajor -> dp(13f).toFloat()
+                    isHalf -> dp(9f).toFloat()
+                    else -> dp(5f).toFloat()
+                }
+                val distance = kotlin.math.abs(x - centreX) / (width / 2f)
+                tickPaint.alpha = (235f * (1f - distance * 0.42f))
+                    .toInt().coerceIn(80, 235)
+                tickPaint.strokeWidth = if (isMajor) dp(1.35f) else dp(1f)
+                canvas.drawLine(
+                    x,
+                    baselineY - tickHeight,
+                    x,
+                    baselineY,
+                    tickPaint
+                )
+            }
+
+            // Fixed centre hairline and dot make the moving ticks read as a dial.
+            canvas.drawLine(
+                centreX,
+                dp(1f),
+                centreX,
+                baselineY + dp(1f),
+                centrePaint
+            )
+            canvas.drawCircle(
+                centreX,
+                dp(2f),
+                dp(2f),
+                centreDotPaint
+            )
         }
     }
 
