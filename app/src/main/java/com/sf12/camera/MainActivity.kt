@@ -34,6 +34,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.storage.StorageManager
 import android.os.Handler
+import android.os.SystemClock
 import android.os.HandlerThread
 import android.os.Looper
 import android.provider.MediaStore
@@ -88,6 +89,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var modeRow: LinearLayout
     private lateinit var shutterRow: LinearLayout
     private lateinit var statusHint: TextView
+    private lateinit var timerCountdownView: TextView
     private var captureOverlay: FrameLayout? = null
     private var captureHiddenViewStates: List<Pair<View, Int>>? = null
     private var captureFrozenPreview: Bitmap? = null
@@ -228,10 +230,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     @Volatile private var cameraCapabilityReport = "Open the camera preview to generate a hardware capability report."
     private var openingCamera = false
     private var capturePending = false
+    private var timerDeadlineRealtimeMs = 0L
 
     private val permissionRequestCode = 710
     private val galleryPermissionRequestCode = 711
-    private val timerRunnable = Runnable { captureStillPhoto() }
+    private val timerRunnable = object : Runnable {
+        override fun run() {
+            if (!capturePending) return
+            val remainingMs = timerDeadlineRealtimeMs - SystemClock.elapsedRealtime()
+            if (remainingMs <= 0L) {
+                capturePending = false
+                hideTimerCountdown()
+                captureStillPhoto()
+                return
+            }
+
+            val secondsLeft = ((remainingMs + 999L) / 1000L).toInt()
+            if (::timerCountdownView.isInitialized) {
+                timerCountdownView.text = secondsLeft.toString()
+                timerCountdownView.contentDescription = "Photo in $secondsLeft seconds"
+                timerCountdownView.visibility = View.VISIBLE
+            }
+            mainHandler.postDelayed(this, minOf(remainingMs, 1000L))
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -322,6 +344,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     override fun onPause() {
         mainHandler.removeCallbacks(timerRunnable)
         capturePending = false
+        hideTimerCountdown()
         dismissCaptureOverlay(animate = false)
         closeCamera()
         stopCameraThread()
@@ -426,6 +449,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP
             )
+        )
+
+        timerCountdownView = TextView(this).apply {
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xE6121212.toInt())
+                setStroke(dp(1), 0x88FFFFFF.toInt())
+            }
+            visibility = View.GONE
+            elevation = dp(8).toFloat()
+        }
+        root.addView(
+            timerCountdownView,
+            FrameLayout.LayoutParams(dp(54), dp(54), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(68)
+                rightMargin = dp(16)
+            }
         )
 
         expandedOptionsRow = LinearLayout(this).apply {
@@ -2090,16 +2137,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun weightedControl() = LinearLayout.LayoutParams(0, dp(52), 1f)
 
+    private fun isFlashAvailable(): Boolean {
+        return cameraCharacteristics
+            ?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+    }
+
     private fun cycleFlash() {
+        if (!isFlashAvailable()) {
+            Toast.makeText(this, "Flash is unavailable on this camera.", Toast.LENGTH_SHORT).show()
+            return
+        }
         showExpandedOptions("flash")
     }
 
     private fun updateFlashButton() {
         if (!::flashButton.isInitialized) return
-        flashButton.contentDescription = when (flashMode) {
-            0 -> "Flash automatic"
-            1 -> "Flash on"
-            else -> "Flash off"
+        val available = isFlashAvailable()
+        flashButton.isEnabled = available
+        flashButton.alpha = if (available) 1f else 0.38f
+        flashButton.contentDescription = if (!available) {
+            "Flash unavailable"
+        } else {
+            when (flashMode) {
+                0 -> "Flash automatic"
+                1 -> "Flash on"
+                else -> "Flash off"
+            }
         }
         flashButton.invalidate()
     }
@@ -2181,9 +2244,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     "ratio_1_1" -> "Square photo ratio"
                     else -> "Full photo ratio"
                 }
-                val available = cameraCharacteristics
-                    ?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-                if (option == "flashOn" && !available) {
+                val available = isFlashAvailable()
+                if (option.startsWith("flash") && !available) {
                     isEnabled = false
                     alpha = 0.35f
                 }
@@ -2363,15 +2425,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val delay = timerSeconds
         if (delay > 0) {
             capturePending = true
-            Toast.makeText(this, "Photo in ${delay}s", Toast.LENGTH_SHORT).show()
-            mainHandler.postDelayed(timerRunnable, delay * 1000L)
+            timerDeadlineRealtimeMs = SystemClock.elapsedRealtime() + delay * 1000L
+            mainHandler.removeCallbacks(timerRunnable)
+            timerRunnable.run()
         } else {
             captureStillPhoto()
         }
     }
 
+    private fun hideTimerCountdown() {
+        if (::timerCountdownView.isInitialized) {
+            timerCountdownView.visibility = View.GONE
+        }
+    }
+
     private fun captureStillPhoto() {
         capturePending = false
+        hideTimerCountdown()
         if (pendingStillCapture != null || portraitProcessing) {
             Toast.makeText(
                 this,
@@ -2673,19 +2743,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun setFlashForRequest(builder: CaptureRequest.Builder) {
-        val available = cameraCharacteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-        if (!available || lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+        val characteristics = cameraCharacteristics
+        if (characteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) != true) {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             return
         }
-        builder.set(
-            CaptureRequest.CONTROL_AE_MODE,
-            when (flashMode) {
-                0 -> CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
-                1 -> CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
-                else -> CaptureRequest.CONTROL_AE_MODE_ON
-            }
-        )
+
+        val supportedAeModes = characteristics
+            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
+            ?.toSet()
+            .orEmpty()
+        val requestedAeMode = when (flashMode) {
+            0 -> CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+            1 -> CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+            else -> CaptureRequest.CONTROL_AE_MODE_ON
+        }
+        val aeMode = when {
+            requestedAeMode in supportedAeModes -> requestedAeMode
+            flashMode != 2 &&
+                CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH in supportedAeModes ->
+                CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+            CaptureRequest.CONTROL_AE_MODE_ON in supportedAeModes ->
+                CaptureRequest.CONTROL_AE_MODE_ON
+            else -> supportedAeModes.firstOrNull() ?: CaptureRequest.CONTROL_AE_MODE_ON
+        }
+        // Auto/always flash must be selected through AE so the camera can meter
+        // the scene and fire the strobe at the correct point in the exposure.
+        builder.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
     }
 
     private fun applyZoom(builder: CaptureRequest.Builder) {
@@ -4275,23 +4359,41 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun configurePreviewTransform(viewWidth: Int, viewHeight: Int) {
         val size = previewSize ?: return
         if (viewWidth <= 0 || viewHeight <= 0) return
+
         val rotation = windowManager.defaultDisplay.rotation
+        val swapsDimensions =
+            rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270
         val matrix = android.graphics.Matrix()
-        val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        val bufferRect = android.graphics.RectF(
-            0f, 0f, size.height.toFloat(), size.width.toFloat()
+        val viewRect = android.graphics.RectF(
+            0f, 0f, viewWidth.toFloat(), viewHeight.toFloat()
         )
+        // Use the buffer's actual orientation for the current display rotation.
+        // The old path skipped all scaling at ROTATION_0, which stretched the
+        // camera stream to the TextureView and caused intermittent squashing.
+        val bufferRect = if (swapsDimensions) {
+            android.graphics.RectF(0f, 0f, size.height.toFloat(), size.width.toFloat())
+        } else {
+            android.graphics.RectF(0f, 0f, size.width.toFloat(), size.height.toFloat())
+        }
         val centerX = viewRect.centerX()
         val centerY = viewRect.centerY()
 
-        if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
-            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-            matrix.setRectToRect(viewRect, bufferRect, android.graphics.Matrix.ScaleToFit.FILL)
-            val scale = max(
-                viewHeight.toFloat() / bufferRect.height(),
-                viewWidth.toFloat() / bufferRect.width()
-            )
-            matrix.postScale(scale, scale, centerX, centerY)
+        bufferRect.offset(
+            centerX - bufferRect.centerX(),
+            centerY - bufferRect.centerY()
+        )
+        matrix.setRectToRect(
+            viewRect,
+            bufferRect,
+            android.graphics.Matrix.ScaleToFit.FILL
+        )
+        val scale = max(
+            viewHeight.toFloat() / bufferRect.height(),
+            viewWidth.toFloat() / bufferRect.width()
+        )
+        matrix.postScale(scale, scale, centerX, centerY)
+
+        if (swapsDimensions) {
             matrix.postRotate(90f * (rotation - 2), centerX, centerY)
         } else if (rotation == Surface.ROTATION_180) {
             matrix.postRotate(180f, centerX, centerY)
