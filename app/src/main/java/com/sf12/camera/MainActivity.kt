@@ -4914,19 +4914,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private val readoutBubblePaint = android.graphics.Paint(
             android.graphics.Paint.ANTI_ALIAS_FLAG
         ).apply {
-            color = 0xD9000000.toInt()
+            color = Color.WHITE
             style = android.graphics.Paint.Style.FILL
-        }
-        private val readoutBubbleStrokePaint = android.graphics.Paint(
-            android.graphics.Paint.ANTI_ALIAS_FLAG
-        ).apply {
-            color = 0x66FFFFFF
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = dp(1f).toFloat()
         }
         fun setSettledReadout(show: Boolean) {
             if (settledReadout == show) return
             settledReadout = show
+            layoutParams = layoutParams?.apply {
+                height = dp(if (show) 46 else 25)
+            }
             invalidate()
         }
 
@@ -4953,37 +4949,25 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val readoutPaint = android.graphics.Paint(
                     android.graphics.Paint.ANTI_ALIAS_FLAG
                 ).apply {
-                    color = Color.WHITE
-                    textSize = dp(14f).toFloat()
+                    color = Color.BLACK
+                    textSize = 12f * resources.displayMetrics.scaledDensity
                     textAlign = android.graphics.Paint.Align.CENTER
                     typeface = android.graphics.Typeface.create(
-                        "sans-serif-medium",
+                        "sans-serif",
                         android.graphics.Typeface.NORMAL
                     )
                 }
                 val readoutText = String.format(Locale.US, "%.0f×", currentZoom)
-                val bubbleHeight = dp(25f).toFloat()
-                val horizontalPadding = dp(12f).toFloat()
-                val bubbleWidth = readoutPaint.measureText(readoutText) + horizontalPadding * 2f
+                val bubbleWidth = dp(44f).toFloat()
+                val bubbleHeight = dp(46f).toFloat()
                 val bubbleRect = android.graphics.RectF(
                     centreX - bubbleWidth / 2f,
                     (height - bubbleHeight) / 2f,
                     centreX + bubbleWidth / 2f,
                     (height + bubbleHeight) / 2f
                 )
-                val bubbleRadius = bubbleHeight / 2f
-                canvas.drawRoundRect(
-                    bubbleRect,
-                    bubbleRadius,
-                    bubbleRadius,
-                    readoutBubblePaint
-                )
-                canvas.drawRoundRect(
-                    bubbleRect,
-                    bubbleRadius,
-                    bubbleRadius,
-                    readoutBubbleStrokePaint
-                )
+                // Match the selected zoom chip: a white oval with black 12sp text.
+                canvas.drawOval(bubbleRect, readoutBubblePaint)
                 val metrics = readoutPaint.fontMetrics
                 val baseline = height / 2f - (metrics.ascent + metrics.descent) / 2f
                 canvas.drawText(readoutText, centreX, baseline, readoutPaint)
