@@ -3084,6 +3084,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 chip.layoutParams = params
             }
         }
+
+        // Keep the nearest zoom number centred while a pinch gesture changes
+        // the zoom. Do not wait for onScaleEnd to reposition the number strip.
+        zoomRow.post {
+            if (!::zoomRow.isInitialized || selectedIndex >= zoomChipsRow.childCount) {
+                return@post
+            }
+            val selectedChip = zoomChipsRow.getChildAt(selectedIndex) ?: return@post
+            val targetScroll = (
+                selectedChip.left + selectedChip.width / 2 - zoomRow.width / 2
+            ).coerceAtLeast(0)
+            zoomRow.scrollTo(targetScroll, 0)
+        }
     }
 
     private fun setZoom(value: Float) {
