@@ -684,7 +684,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         .coerceIn(bounds.first, bounds.second)
                     if (abs(nextZoom - zoomRatio) > 0.0005f) {
                         zoomRatio = nextZoom
-                        val routeChanged = updateZoomCameraRoute()
+                        val routeChanged = updateZoomCameraRoute(
+                            allowStandaloneSwitch = false
+                        )
                         if (!routeChanged) startPreviewRepeating()
                         refreshZoomFeedback()
                     }
@@ -695,8 +697,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     if (abs(zoomRatio - 1f) < 0.025f) {
                         zoomRatio = 1f
                         zoomOptionsExpanded = false
-                        updateZoomCameraRoute()
                     }
+                    // Commit a standalone ultra-wide/main camera handoff only
+                    // after the two-finger gesture has fully ended.
+                    updateZoomCameraRoute(allowStandaloneSwitch = true)
                     setZoomButtons()
                 }
             }
@@ -2890,7 +2894,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ultraWideIsStandaloneCameraId = true
     }
 
-    private fun updateZoomCameraRoute(): Boolean {
+    private fun updateZoomCameraRoute(
+        allowStandaloneSwitch: Boolean = true
+    ): Boolean {
         val mainCharacteristics = rearMainCameraCharacteristics ?: cameraCharacteristics
         val logicalRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             mainCharacteristics?.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
@@ -2905,7 +2911,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (
             lensFacing == CameraCharacteristics.LENS_FACING_BACK &&
             ultraWideIsStandaloneCameraId &&
-            !canZoomOutLogically
+            !canZoomOutLogically &&
+            allowStandaloneSwitch
         ) {
             val targetWide = zoomRatio < 0.98f
             if (targetWide == usingStandaloneUltraWideCamera) return false
@@ -4852,18 +4859,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private val centrePaint = android.graphics.Paint(
             android.graphics.Paint.ANTI_ALIAS_FLAG
         ).apply {
-            color = 0xFFFFD54F.toInt()
+            color = 0xCCFFD54F.toInt()
             style = android.graphics.Paint.Style.STROKE
             strokeWidth = dp(2f).toFloat()
             strokeCap = android.graphics.Paint.Cap.ROUND
         }
-        private val centreDotPaint = android.graphics.Paint(
-            android.graphics.Paint.ANTI_ALIAS_FLAG
-        ).apply {
-            color = 0xFFFFD54F.toInt()
-            style = android.graphics.Paint.Style.FILL
-        }
-
         fun updateZoom(value: Float, min: Float, max: Float) {
             val safeMin = min.coerceAtLeast(0.1f)
             val safeMax = max.coerceAtLeast(safeMin)
@@ -4930,19 +4930,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 )
             }
 
-            // Fixed centre hairline and dot make the moving ticks read as a dial.
+            // Fixed, slightly translucent centre hairline; no dot or marker cap.
             canvas.drawLine(
                 centreX,
                 dp(1f).toFloat(),
                 centreX,
                 baselineY + dp(1f).toFloat(),
                 centrePaint
-            )
-            canvas.drawCircle(
-                centreX,
-                dp(2f).toFloat(),
-                dp(2f).toFloat(),
-                centreDotPaint
             )
         }
     }
