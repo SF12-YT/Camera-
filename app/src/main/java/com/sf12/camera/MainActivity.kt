@@ -4846,7 +4846,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ).apply {
             color = Color.WHITE
             style = android.graphics.Paint.Style.STROKE
-            strokeWidth = dp(1f)
+            strokeWidth = dp(1f).toFloat()
             strokeCap = android.graphics.Paint.Cap.ROUND
         }
         private val centrePaint = android.graphics.Paint(
@@ -4883,7 +4883,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (width <= 0 || height <= 0) return
 
             val centreX = width / 2f
-            val baselineY = height - dp(3f)
+            val baselineY = height.toFloat() - dp(3f).toFloat()
             val pixelsPerZoom = dp(62f).toFloat()
             val halfRange = width / (2f * pixelsPerZoom)
             val firstValue = maxOf(
