@@ -4840,14 +4840,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         private var minimumZoom = 1f
         private var maximumZoom = 10f
 
-        private val baselinePaint = android.graphics.Paint(
-            android.graphics.Paint.ANTI_ALIAS_FLAG
-        ).apply {
-            color = 0x66FFFFFF
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = dp(1f).toFloat()
-            strokeCap = android.graphics.Paint.Cap.ROUND
-        }
         private val tickPaint = android.graphics.Paint(
             android.graphics.Paint.ANTI_ALIAS_FLAG
         ).apply {
@@ -4896,14 +4888,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
             val firstTick = kotlin.math.ceil(firstValue * 10f - 0.0001f).toInt()
             val lastTick = kotlin.math.floor(lastValue * 10f + 0.0001f).toInt()
-
-            canvas.drawLine(
-                0f,
-                baselineY,
-                width.toFloat(),
-                baselineY,
-                baselinePaint
-            )
 
             for (tickIndex in firstTick..lastTick) {
                 val tickValue = tickIndex / 10f
