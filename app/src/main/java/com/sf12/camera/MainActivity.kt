@@ -437,9 +437,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         zoomRow.addView(
             zoomChipsRow,
-            HorizontalScrollView.LayoutParams(
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
-                HorizontalScrollView.LayoutParams.MATCH_PARENT
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
         bottomPanel.addView(zoomRow, LinearLayout.LayoutParams(
