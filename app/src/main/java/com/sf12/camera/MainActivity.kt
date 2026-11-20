@@ -3305,6 +3305,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         ultraWideBaseZoomRatio = 1f
         activePhysicalCameraId = null
         zoomRatio = 1f
+        zoomOptionsExpanded = false
         cameraId = rearMainCameraId ?: findCameraId(
             CameraCharacteristics.LENS_FACING_BACK
         )
