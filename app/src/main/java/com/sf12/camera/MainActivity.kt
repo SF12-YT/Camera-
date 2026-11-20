@@ -672,6 +672,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             contentDescription = "Open gallery"
             setOnClickListener { openStockCameraAlbum() }
         }
+        // Keep the thumbnail and its media badge in the same 50dp frame so
+        // the badge aligns to the preview itself, not the taller shutter slot.
+        val galleryPreviewFrame = FrameLayout(this)
         galleryThumbnail = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             background = oval(0xFF303030.toInt())
@@ -679,7 +682,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             setImageDrawable(textDrawablePlaceholder())
             isClickable = false
         }
-        gallerySlot.addView(
+        galleryPreviewFrame.addView(
             galleryThumbnail,
             FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
         )
@@ -688,7 +691,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isClickable = false
             isFocusable = false
         }
-        gallerySlot.addView(
+        galleryPreviewFrame.addView(
             galleryPlaceholder,
             FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
         )
@@ -708,12 +711,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             isFocusable = false
             contentDescription = "Video"
         }
-        gallerySlot.addView(
+        galleryPreviewFrame.addView(
             galleryVideoBadge,
             FrameLayout.LayoutParams(dp(20), dp(20), Gravity.BOTTOM or Gravity.END).apply {
                 rightMargin = dp(1)
                 bottomMargin = dp(1)
             }
+        )
+        gallerySlot.addView(
+            galleryPreviewFrame,
+            FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER)
         )
         shutterRow.addView(gallerySlot, LinearLayout.LayoutParams(0, dp(82), 1f))
 
