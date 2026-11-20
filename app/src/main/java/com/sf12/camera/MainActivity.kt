@@ -77,7 +77,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var bottomGradientView: View
     private lateinit var expandedOptionsRow: LinearLayout
     private lateinit var quickControls: LinearLayout
-    private lateinit var zoomRow: LinearLayout
+    private lateinit var zoomRow: HorizontalScrollView
+    private lateinit var zoomChipsRow: LinearLayout
     private lateinit var modeScroll: HorizontalScrollView
     private lateinit var modeRow: LinearLayout
     private lateinit var shutterRow: LinearLayout
@@ -423,11 +424,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
         )
 
-        zoomRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        zoomRow = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            isFillViewport = true
             setPadding(0, 0, 0, dp(10))
         }
+        zoomChipsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        zoomRow.addView(
+            zoomChipsRow,
+            HorizontalScrollView.LayoutParams(
+                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
+                HorizontalScrollView.LayoutParams.MATCH_PARENT
+            )
+        )
         bottomPanel.addView(zoomRow, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(56)
         ))
@@ -2180,14 +2194,15 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         if (frozenFrame != null && !frozenFrame.isRecycled) {
             captureFrozenPreview = frozenFrame
-            captureFrozenPreviewView = ImageView(this).apply {
+            val frozenImageView = ImageView(this).apply {
                 setImageBitmap(frozenFrame)
                 scaleType = ImageView.ScaleType.FIT_XY
                 isClickable = false
                 contentDescription = "Frozen camera preview"
             }
+            captureFrozenPreviewView = frozenImageView
             overlay.addView(
-                captureFrozenPreviewView,
+                frozenImageView,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
@@ -2666,7 +2681,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun setZoomButtons() {
         if (!::zoomRow.isInitialized) return
-        zoomRow.removeAllViews()
+        zoomChipsRow.removeAllViews()
 
         val bounds = zoomBounds()
         val minZoom = bounds.first
@@ -2703,8 +2718,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         zoomLevels = levels.sorted()
         zoomRatio = zoomRatio.coerceIn(minZoom, maxZoom)
 
-        zoomLevels.forEach { level ->
-            val selected = abs(zoomRatio - level) < 0.08f
+        val selectedIndex = zoomLevels.indices.minByOrNull {
+            abs(zoomRatio - zoomLevels[it])
+        } ?: 0
+        zoomLevels.forEachIndexed { index, level ->
+            val selected = index == selectedIndex
             val label = if (abs(level - level.toInt()) < 0.01f) {
                 "${level.toInt()}×"
             } else {
@@ -2722,13 +2740,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 setOnClickListener { setZoom(level) }
             }
             val diameter = if (selected) dp(44) else dp(38)
-            zoomRow.addView(
+            zoomChipsRow.addView(
                 chip,
                 LinearLayout.LayoutParams(diameter, dp(46)).apply {
                     marginStart = dp(4)
                     marginEnd = dp(4)
                 }
             )
+        }
+        zoomRow.post {
+            val selectedChip = zoomChipsRow.getChildAt(selectedIndex)
+            val targetScroll = (
+                selectedChip.left + selectedChip.width / 2 - zoomRow.width / 2
+            ).coerceAtLeast(0)
+            zoomRow.smoothScrollTo(targetScroll, 0)
         }
     }
 
