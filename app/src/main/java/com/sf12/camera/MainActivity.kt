@@ -4241,50 +4241,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun configurePreviewTransform(viewWidth: Int, viewHeight: Int) {
         val size = previewSize ?: return
         if (viewWidth <= 0 || viewHeight <= 0) return
-
-        val displayRotationDegrees = when (windowManager.defaultDisplay.rotation) {
-            Surface.ROTATION_90 -> 90
-            Surface.ROTATION_180 -> 180
-            Surface.ROTATION_270 -> 270
-            else -> 0
-        }
-        val sensorOrientation = cameraCharacteristics?.get(
-            CameraCharacteristics.SENSOR_ORIENTATION
-        ) ?: 0
-        val relativeRotation = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-            (sensorOrientation + displayRotationDegrees) % 360
-        } else {
-            (sensorOrientation - displayRotationDegrees + 360) % 360
-        }
-
-        val bufferCenterX = size.width / 2f
-        val bufferCenterY = size.height / 2f
-        val viewCenterX = viewWidth / 2f
-        val viewCenterY = viewHeight / 2f
-        val rotatedWidth = if (relativeRotation == 90 || relativeRotation == 270) {
-            size.height.toFloat()
-        } else {
-            size.width.toFloat()
-        }
-        val rotatedHeight = if (relativeRotation == 90 || relativeRotation == 270) {
-            size.width.toFloat()
-        } else {
-            size.height.toFloat()
-        }
-
-        // Scale uniformly and centre-crop. Stretching the buffer independently
-        // on each axis is what makes the preview appear squashed on some routes.
-        val scale = max(
-            viewWidth.toFloat() / rotatedWidth,
-            viewHeight.toFloat() / rotatedHeight
+        val rotation = windowManager.defaultDisplay.rotation
+        val matrix = android.graphics.Matrix()
+        val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
+        val bufferRect = android.graphics.RectF(
+            0f, 0f, size.height.toFloat(), size.width.toFloat()
         )
-        val matrix = android.graphics.Matrix().apply {
-            setRotate(relativeRotation.toFloat(), bufferCenterX, bufferCenterY)
-            postScale(scale, scale, bufferCenterX, bufferCenterY)
-            postTranslate(viewCenterX - bufferCenterX, viewCenterY - bufferCenterY)
-            if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-                postScale(-1f, 1f, viewCenterX, viewCenterY)
-            }
+        val centerX = viewRect.centerX()
+        val centerY = viewRect.centerY()
+
+        if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, android.graphics.Matrix.ScaleToFit.FILL)
+            val scale = max(
+                viewHeight.toFloat() / bufferRect.height(),
+                viewWidth.toFloat() / bufferRect.width()
+            )
+            matrix.postScale(scale, scale, centerX, centerY)
+            matrix.postRotate(90f * (rotation - 2), centerX, centerY)
+        } else if (rotation == Surface.ROTATION_180) {
+            matrix.postRotate(180f, centerX, centerY)
         }
         previewView.setTransform(matrix)
     }
