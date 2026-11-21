@@ -1377,9 +1377,60 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         settingsOverlay = overlay
     }
 
+    private fun buildVideoCapabilityReport(): String {
+        val characteristics = if (activePhysicalCameraId != null) {
+            ultraWideCameraCharacteristics ?: cameraCharacteristics
+        } else {
+            cameraCharacteristics
+        }
+        val map = characteristics?.get(
+            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+        )
+        val aeRanges = characteristics
+            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.toList().orEmpty()
+            .sortedWith(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
+            .joinToString { "[${it.lower}, ${it.upper}]" }
+            .ifEmpty { "none reported" }
+        val recorderSizes = map?.getOutputSizes(MediaRecorder::class.java)
+            ?.toList().orEmpty()
+            .distinctBy { it.width to it.height }
+            .sortedByDescending { it.width.toLong() * it.height.toLong() }
+            .joinToString { "${it.width}x${it.height}" }
+            .ifEmpty { "none reported" }
+        val highSpeed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && map != null) {
+            map.highSpeedVideoSizes?.toList().orEmpty()
+                .distinctBy { it.width to it.height }
+                .sortedByDescending { it.width.toLong() * it.height.toLong() }
+                .joinToString("; ") { size ->
+                    val ranges = runCatching {
+                        map.getHighSpeedVideoFpsRangesFor(size).toList()
+                    }.getOrDefault(emptyList())
+                    "${size.width}x${size.height}: " +
+                        ranges.joinToString { "[${it.lower}, ${it.upper}]" }
+                }
+                .ifEmpty { "none reported" }
+        } else {
+            "not available on this API/camera"
+        }
+        val selectedModes = availableVideoModes
+            .joinToString(", ") { it.displayName() }
+            .ifEmpty { "none detected" }
+        return buildString {
+            appendLine("Video capability snapshot")
+            appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("Camera ID: ${cameraId ?: "unknown"}")
+            appendLine("Physical camera ID: ${activePhysicalCameraId ?: "none"}")
+            appendLine("Camera2 AE FPS ranges: $aeRanges")
+            appendLine("MediaRecorder output sizes: $recorderSizes")
+            appendLine("Constrained high-speed sizes/ranges: $highSpeed")
+            append("Detected app modes: $selectedModes")
+        }
+    }
+
     private fun showCameraCapabilityReport() {
         val reportText = TextView(this).apply {
-            text = cameraCapabilityReport
+            text = cameraCapabilityReport + "\n\n" + buildVideoCapabilityReport()
             textSize = 12f
             typeface = android.graphics.Typeface.MONOSPACE
             setTextColor(Color.WHITE)
@@ -1642,15 +1693,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
         // Many devices expose 60 FPS only through constrained-high-speed stream
         // configurations rather than the regular AE target FPS list.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && activePhysicalCameraId == null) {
-            map?.highSpeedVideoSizes?.toList().orEmpty()
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            activePhysicalCameraId == null &&
+            map != null
+        ) {
+            map.highSpeedVideoSizes?.toList().orEmpty()
                 .distinctBy { it.width to it.height }
                 .forEach { size ->
                     val ranges = runCatching {
                         map.getHighSpeedVideoFpsRangesFor(size).toList()
                     }.getOrDefault(emptyList())
                     ranges.forEach { range ->
-                        if (range.lower <= 60 && range.upper >= 60) {
+                        if (range.lower == 60 && range.upper == 60) {
                             candidates.add(VideoRecordingMode(size, 60, range, true))
                         }
                     }
@@ -1671,7 +1726,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         )
                     }.thenByDescending {
                         it.size.width.toLong() * it.size.height.toLong()
-                    }.thenByDescending { it.constrainedHighSpeed }
+                    }.thenBy { it.constrainedHighSpeed }
                 ).first()
             }
             .sortedWith(
@@ -2825,43 +2880,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         prepareVideoRecording(includeAudio = true)
     }
 
-    private fun chooseHighSpeedPreviewSize(mode: VideoRecordingMode): Size? {
-        val characteristics = cameraCharacteristics ?: return null
-        val map = characteristics.get(
-            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
-        ) ?: return null
-        val desiredRatio = maxOf(mode.size.width, mode.size.height).toFloat() /
-            minOf(mode.size.width, mode.size.height).toFloat()
-        return map.getOutputSizes(SurfaceTexture::class.java)
-            ?.filter { size ->
-                size.width <= mode.size.width &&
-                    size.height <= mode.size.height &&
-                    abs(size.width.toFloat() / size.height.toFloat() - desiredRatio) < 0.03f
-            }
-            ?.maxByOrNull { it.width.toLong() * it.height.toLong() }
-            ?: map.getOutputSizes(SurfaceTexture::class.java)
-                ?.minByOrNull {
-                    abs(it.width.toFloat() / it.height.toFloat() - desiredRatio)
-                }
-    }
-
     private fun prepareVideoRecording(includeAudio: Boolean) {
         val device = cameraDevice ?: return
         val preview = previewSurface ?: return
         val mode = selectedVideoMode ?: return
         if (mode.constrainedHighSpeed) {
-            val compatiblePreviewSize = chooseHighSpeedPreviewSize(mode)
-            if (compatiblePreviewSize == null) {
-                Toast.makeText(
-                    this,
-                    "No compatible preview stream is available for high-speed recording.",
-                    Toast.LENGTH_LONG
-                ).show()
-                return
-            }
             previewView.surfaceTexture?.setDefaultBufferSize(
-                compatiblePreviewSize.width,
-                compatiblePreviewSize.height
+                mode.size.width,
+                mode.size.height
             )
             configurePreviewTransform(previewView.width, previewView.height)
         }
