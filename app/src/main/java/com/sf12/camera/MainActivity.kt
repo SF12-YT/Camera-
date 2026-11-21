@@ -3019,6 +3019,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         var recordingSaved = false
         if (wasRecording) {
             try {
+                captureSession?.stopRepeating()
                 recorder?.stop()
                 recordingSaved = true
             } catch (_: RuntimeException) {
