@@ -2889,7 +2889,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             addTarget(preview)
                             addTarget(recorder.surface)
                             set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                            set(CaptureRequest.CONTROL_AF_MODE, currentAfMode())
+                            set(CaptureRequest.CONTROL_AF_MODE, currentRecordingAfMode())
                             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mode.fpsRange)
@@ -4777,6 +4777,23 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
     }
 
+    private fun currentRecordingAfMode(): Int {
+        val supported = cameraCharacteristics
+            ?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+            ?.toSet().orEmpty()
+        return when {
+            focusLocked && CaptureRequest.CONTROL_AF_MODE_AUTO in supported ->
+                CaptureRequest.CONTROL_AF_MODE_AUTO
+            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO in supported ->
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE in supported ->
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            CaptureRequest.CONTROL_AF_MODE_AUTO in supported ->
+                CaptureRequest.CONTROL_AF_MODE_AUTO
+            else -> CaptureRequest.CONTROL_AF_MODE_OFF
+        }
+    }
+
     private fun createPreviewRequest(afTrigger: Int): CaptureRequest.Builder? {
         val device = cameraDevice ?: return null
         val surface = previewSurface ?: return null
@@ -4806,7 +4823,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                 }
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, currentAfMode())
+                set(CaptureRequest.CONTROL_AF_MODE, if (isVideoRecording) currentRecordingAfMode() else currentAfMode())
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                 val region = focusMeteringRegion
