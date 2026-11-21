@@ -1378,59 +1378,108 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun buildVideoCapabilityReport(): String {
-        val characteristics = if (activePhysicalCameraId != null) {
-            ultraWideCameraCharacteristics ?: cameraCharacteristics
-        } else {
-            cameraCharacteristics
-        }
-        val map = characteristics?.get(
-            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
-        )
-        val aeRanges = characteristics
-            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.toList().orEmpty()
-            .sortedWith(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
-            .joinToString { "[${it.lower}, ${it.upper}]" }
-            .ifEmpty { "none reported" }
-        val recorderSizes = map?.getOutputSizes(MediaRecorder::class.java)
-            ?.toList().orEmpty()
-            .distinctBy { it.width to it.height }
-            .sortedByDescending { it.width.toLong() * it.height.toLong() }
-            .joinToString { "${it.width}x${it.height}" }
-            .ifEmpty { "none reported" }
-        val highSpeed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && map != null) {
-            map.highSpeedVideoSizes?.toList().orEmpty()
-                .distinctBy { it.width to it.height }
-                .sortedByDescending { it.width.toLong() * it.height.toLong() }
-                .joinToString("; ") { size ->
-                    val ranges = runCatching {
-                        map.getHighSpeedVideoFpsRangesFor(size).toList()
-                    }.getOrDefault(emptyList())
-                    "${size.width}x${size.height}: " +
-                        ranges.joinToString { "[${it.lower}, ${it.upper}]" }
+        fun describeCamera(id: String): String {
+            return try {
+                val characteristics = cameraManager.getCameraCharacteristics(id)
+                val facing = when (
+                    characteristics.get(CameraCharacteristics.LENS_FACING)
+                ) {
+                    CameraCharacteristics.LENS_FACING_BACK -> "rear"
+                    CameraCharacteristics.LENS_FACING_FRONT -> "front"
+                    CameraCharacteristics.LENS_FACING_EXTERNAL -> "external"
+                    else -> "unknown"
                 }
-                .ifEmpty { "none reported" }
-        } else {
-            "not available on this API/camera"
+                val capabilities = characteristics.get(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+                ) ?: intArrayOf()
+                val isLogical = capabilities.contains(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+                )
+                val physicalIds = if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isLogical
+                ) {
+                    characteristics.physicalCameraIds.toList().sorted().joinToString()
+                } else {
+                    "none"
+                }
+                val aeRanges = characteristics
+                    .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    ?.toList().orEmpty()
+                    .sortedWith(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
+                    .joinToString { "[${it.lower}, ${it.upper}]" }
+                    .ifEmpty { "none reported" }
+                val map = characteristics.get(
+                    CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+                )
+                val recorderSizes = map
+                    ?.getOutputSizes(MediaRecorder::class.java)
+                    ?.toList().orEmpty()
+                    .distinctBy { it.width to it.height }
+                    .sortedByDescending { it.width.toLong() * it.height.toLong() }
+                    .joinToString { size ->
+                        val duration = runCatching {
+                            map?.getOutputMinFrameDuration(MediaRecorder::class.java, size) ?: 0L
+                        }.getOrDefault(0L)
+                        val maximumFps = if (duration > 0L) {
+                            "${1_000_000_000L / duration} fps max"
+                        } else {
+                            "duration unavailable"
+                        }
+                        "${size.width}x${size.height} ($maximumFps)"
+                    }
+                    .ifEmpty { "none reported" }
+                val highSpeed = if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && map != null
+                ) {
+                    map.highSpeedVideoSizes?.toList().orEmpty()
+                        .distinctBy { it.width to it.height }
+                        .sortedByDescending { it.width.toLong() * it.height.toLong() }
+                        .joinToString("; ") { size ->
+                            val ranges = runCatching {
+                                map.getHighSpeedVideoFpsRangesFor(size).toList()
+                            }.getOrDefault(emptyList())
+                            "${size.width}x${size.height}: " +
+                                ranges.joinToString { "[${it.lower}, ${it.upper}]" }
+                        }
+                        .ifEmpty { "none reported" }
+                } else {
+                    "not available"
+                }
+                "Camera ID: $id ($facing)\n" +
+                    "Logical multi-camera: $isLogical\n" +
+                    "Physical camera IDs: $physicalIds\n" +
+                    "AE FPS ranges: $aeRanges\n" +
+                    "MediaRecorder sizes/minimum durations: $recorderSizes\n" +
+                    "Constrained high-speed sizes/ranges: $highSpeed"
+            } catch (error: Exception) {
+                "Camera ID: $id (query failed: ${error.message ?: error.javaClass.simpleName})"
+            }
         }
+
+        val cameraInventory = cameraManager.cameraIdList
+            .sorted()
+            .joinToString("\n\n") { describeCamera(it) }
+            .ifEmpty { "No Camera2 camera IDs reported." }
         val selectedModes = availableVideoModes
             .joinToString(", ") { it.displayName() }
             .ifEmpty { "none detected" }
         return buildString {
             appendLine("Video capability snapshot")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
-            appendLine("Camera ID: ${cameraId ?: "unknown"}")
-            appendLine("Physical camera ID: ${activePhysicalCameraId ?: "none"}")
-            appendLine("Camera2 AE FPS ranges: $aeRanges")
-            appendLine("MediaRecorder output sizes: $recorderSizes")
-            appendLine("Constrained high-speed sizes/ranges: $highSpeed")
-            append("Detected app modes: $selectedModes")
+            appendLine("Active camera ID: ${cameraId ?: "unknown"}")
+            appendLine("Active physical camera ID: ${activePhysicalCameraId ?: "none"}")
+            appendLine("Active facing: ${if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) "rear" else "front"}")
+            appendLine("Detected app modes: $selectedModes")
+            appendLine()
+            appendLine("All Camera2 camera IDs (not merged):")
+            append(cameraInventory)
         }
     }
 
     private fun showCameraCapabilityReport() {
+        val fullReport = cameraCapabilityReport + "\n\n" + buildVideoCapabilityReport()
         val reportText = TextView(this).apply {
-            text = cameraCapabilityReport + "\n\n" + buildVideoCapabilityReport()
+            text = fullReport
             textSize = 12f
             typeface = android.graphics.Typeface.MONOSPACE
             setTextColor(Color.WHITE)
@@ -1453,7 +1502,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             .setPositiveButton("Copy report") { _, _ ->
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 clipboard.setPrimaryClip(
-                    ClipData.newPlainText("Camera capability report", cameraCapabilityReport)
+                    ClipData.newPlainText("Camera capability report", fullReport)
                 )
                 Toast.makeText(this, "Capability report copied.", Toast.LENGTH_SHORT).show()
             }
@@ -1649,8 +1698,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
 
     private fun videoModePreferenceKey(): String {
-        val cameraKey = activePhysicalCameraId ?: cameraId ?: lensFacing.toString()
-        return "video_recording_mode_" + cameraKey
+        // Keep one preset per facing direction. A rear ultra-wide camera ID is
+        // another lens in the rear camera system, not a separate video profile.
+        val facingKey = if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+            "rear"
+        } else {
+            "front"
+        }
+        return "video_recording_mode_" + facingKey
     }
 
     private fun refreshVideoRecordingModes() {
@@ -1691,26 +1746,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
-        // Many devices expose 60 FPS only through constrained-high-speed stream
-        // configurations rather than the regular AE target FPS list.
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-            activePhysicalCameraId == null &&
-            map != null
-        ) {
-            map.highSpeedVideoSizes?.toList().orEmpty()
-                .distinctBy { it.width to it.height }
-                .forEach { size ->
-                    val ranges = runCatching {
-                        map.getHighSpeedVideoFpsRangesFor(size).toList()
-                    }.getOrDefault(emptyList())
-                    ranges.forEach { range ->
-                        if (range.lower == 60 && range.upper == 60) {
-                            candidates.add(VideoRecordingMode(size, 60, range, true))
-                        }
-                    }
-                }
-        }
+        // Standard 60 FPS recording is detected from the regular AE FPS ranges
+        // above. Constrained high-speed configurations are a separate 120 FPS+
+        // recording path and must not be used to infer an ordinary 60 FPS mode.
 
         // Collapse different sensor output sizes that share the same visible preset.
         availableVideoModes = candidates
@@ -1976,6 +2014,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         activePrimaryMode = mode
         activeMode = mode
         updatePrimaryModeLabels()
+        if (mode == "Video") {
+            updateZoomCameraRoute()
+            setZoomButtons()
+        }
         updateVideoUi()
         if (mode == "Pro") {
             Toast.makeText(this, "Pro mode is not implemented yet.", Toast.LENGTH_SHORT).show()
@@ -3802,6 +3844,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         val logicalMinimum = range?.lower?.coerceAtLeast(0.1f) ?: 1f
         val wideMinimum = if (
+            activeMode != "Video" &&
             lensFacing == CameraCharacteristics.LENS_FACING_BACK &&
             ultraWidePhysicalCameraId != null &&
             logicalMinimum >= 0.98f
@@ -3912,6 +3955,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         allowStandaloneSwitch: Boolean = true
     ): Boolean {
         if (isVideoRecording || videoStartPending) return false
+
+        // Video stays on the rear logical/main camera. If the ultra-wide is
+        // exposed only as a separate Camera2 ID, switching CameraDevice here
+        // would interrupt the unified video-camera experience. A logical camera
+        // can still perform its own seamless lens hand-off through zoom ratio.
+        if (activeMode == "Video" && lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+            val mainId = rearMainCameraId ?: findCameraId(
+                CameraCharacteristics.LENS_FACING_BACK
+            ) ?: return false
+            if (usingStandaloneUltraWideCamera || cameraId != mainId) {
+                usingStandaloneUltraWideCamera = false
+                activePhysicalCameraId = null
+                if (zoomRatio < 1f) zoomRatio = 1f
+                cameraId = mainId
+                closeCamera()
+                if (previewView.isAvailable) openCamera()
+                return true
+            }
+            if (activePhysicalCameraId != null) {
+                activePhysicalCameraId = null
+                refreshVideoRecordingModes()
+                if (cameraDevice != null) createImageReaderAndSession()
+                return true
+            }
+            return false
+        }
 
         val mainCharacteristics = rearMainCameraCharacteristics ?: cameraCharacteristics
         val logicalRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
