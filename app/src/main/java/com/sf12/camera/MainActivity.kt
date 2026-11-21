@@ -2832,10 +2832,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
             }
-            insertedUri = contentResolver.insert(collection, values)
+            val outputUri = contentResolver.insert(collection, values)
                 ?: throw IllegalStateException("Unable to create a video entry")
-            descriptor = contentResolver.openFileDescriptor(insertedUri, "w")
+            insertedUri = outputUri
+            val outputDescriptor = contentResolver.openFileDescriptor(outputUri, "w")
                 ?: throw IllegalStateException("Unable to open video output")
+            descriptor = outputDescriptor
 
             @Suppress("DEPRECATION")
             val activeRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -2859,7 +2861,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             activeRecorder.setVideoEncodingBitRate(bitrate.toInt())
             activeRecorder.setVideoFrameRate(mode.fps)
             activeRecorder.setVideoSize(mode.size.width, mode.size.height)
-            activeRecorder.setOutputFile(descriptor.fileDescriptor)
+            activeRecorder.setOutputFile(outputDescriptor.fileDescriptor)
             val sensorOrientation = cameraCharacteristics
                 ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             val displayRotation = when (windowManager.defaultDisplay.rotation) {
@@ -2876,8 +2878,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             activeRecorder.setOrientationHint(orientationHint)
             activeRecorder.prepare()
 
-            videoRecordingUri = insertedUri
-            videoOutputDescriptor = descriptor
+            videoRecordingUri = outputUri
+            videoOutputDescriptor = outputDescriptor
             videoRecorder = activeRecorder
 
             runCatching { captureSession?.close() }
