@@ -1932,20 +1932,21 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 maxLines = 1
             }
             val frameRate = TextView(this).apply {
-                text = mode.fps.toString()
+                text = mode.fps.toString() + " FPS"
                 gravity = Gravity.CENTER
-                textSize = 14f
+                textSize = 11f
+                includeFontPadding = false
                 typeface = android.graphics.Typeface.create(
                     "sans-serif-medium",
                     android.graphics.Typeface.BOLD
                 )
                 setTextColor(Color.BLACK)
-                setPadding(dp(7), dp(1), dp(7), dp(1))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
                 background = rounded(
                     if (selected) 0xFFFFD429.toInt() else Color.WHITE,
                     5
                 )
-                minWidth = dp(34)
+                minWidth = dp(48)
             }
             val option = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
