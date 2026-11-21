@@ -1716,6 +1716,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun refreshVideoRecordingModes() {
+        // Use the active lens' own stream map. Camera-wide AE ranges alone do
+        // not prove that every advertised MediaRecorder size can sustain 60 fps.
         val characteristics = if (activePhysicalCameraId != null) {
             ultraWideCameraCharacteristics ?: cameraCharacteristics
         } else {
@@ -1724,57 +1726,70 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val map = characteristics?.get(
             CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
         )
-        val outputSizes = map?.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty()
         val fpsRanges = characteristics
             ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             ?.toList().orEmpty()
         val candidates = mutableListOf<VideoRecordingMode>()
 
-        outputSizes.distinctBy { it.width to it.height }.forEach { size ->
-            listOf(30, 60).forEach fpsLoop@{ fps ->
-                val range = fpsRanges
-                    .filter { fps >= it.lower && fps <= it.upper }
-                    .sortedWith(
-                        compareBy<Range<Int>> { if (it.upper == fps) 0 else 1 }
-                            .thenBy { it.upper - it.lower }
-                    )
-                    .firstOrNull() ?: return@fpsLoop
-                val minimumFrameDuration = runCatching {
-                    map?.getOutputMinFrameDuration(MediaRecorder::class.java, size) ?: 0L
-                }.getOrDefault(0L)
-                val maximumFps = if (minimumFrameDuration > 0L) {
-                    1_000_000_000L / minimumFrameDuration
-                } else {
-                    Long.MAX_VALUE
-                }
-                // AE target FPS ranges are the camera's direct declaration of
-                // selectable frame rates. Some vendor HALs report a conservative
-                // MediaRecorder minimum frame duration (often 30 fps) even when
-                // their stock camera supports 60 fps. Keep 60 fps when AE advertises
-                // it; the duration remains visible in the capability report and
-                // the recording session itself is the final compatibility check.
-                if (fps.toLong() <= maximumFps || fps == 60) {
+        fun bestRangeFor(fps: Int): Range<Int>? {
+            return fpsRanges
+                .filter { fps >= it.lower && fps <= it.upper }
+                .sortedWith(
+                    compareBy<Range<Int>> { if (it.lower == fps && it.upper == fps) 0 else 1 }
+                        .thenBy { it.upper - it.lower }
+                )
+                .firstOrNull()
+        }
+
+        fun isUsefulVideoSize(size: Size): Boolean {
+            val width = maxOf(size.width, size.height)
+            val height = minOf(size.width, size.height)
+            val ratio = width.toFloat() / height.toFloat()
+            // Reject thumbnail/preview streams such as 960x540. They are not
+            // valid substitutes for the stock camera's HD/FHD recording presets.
+            return width >= 1280 && height >= 720 && ratio in 1.70f..1.80f
+        }
+
+        val outputSizes = map?.getOutputSizes(MediaRecorder::class.java)
+            ?.toList().orEmpty()
+            .filter(::isUsefulVideoSize)
+            .distinctBy { it.width to it.height }
+
+        outputSizes.forEach { size ->
+            val minimumFrameDuration = runCatching {
+                map?.getOutputMinFrameDuration(MediaRecorder::class.java, size) ?: 0L
+            }.getOrDefault(0L)
+            val maximumFpsForSize = if (minimumFrameDuration > 0L) {
+                1_000_000_000L / minimumFrameDuration
+            } else {
+                0L
+            }
+
+            listOf(30, 60).forEach { fps ->
+                val range = bestRangeFor(fps) ?: return@forEach
+                // A zero/unknown duration is not evidence of 60-fps support.
+                // Require the per-size duration to sustain the requested rate.
+                val sizeSupportsRate = minimumFrameDuration > 0L &&
+                    maximumFpsForSize >= fps.toLong()
+                if (sizeSupportsRate) {
                     candidates.add(VideoRecordingMode(size, fps, range, false))
                 }
             }
         }
 
-        // Some Camera2 implementations expose 60 fps only in the constrained
-        // high-speed configuration map. Add those modes only when the ordinary
-        // MediaRecorder path did not already expose the same visible preset.
+        // Include constrained high-speed modes only when Camera2 explicitly
+        // advertises that exact size/rate. Keep the same minimum useful size.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && map != null) {
-            map.highSpeedVideoSizes?.toList().orEmpty().forEach { size ->
-                val label = VideoRecordingMode(size, 60, Range(60, 60), true).resolutionLabel()
-                val alreadyAvailable = candidates.any {
-                    it.fps == 60 && it.resolutionLabel() == label
-                }
-                if (!alreadyAvailable) {
+            map.highSpeedVideoSizes?.toList().orEmpty()
+                .filter(::isUsefulVideoSize)
+                .forEach { size ->
                     val highSpeedRange = runCatching {
                         map.getHighSpeedVideoFpsRangesFor(size).toList()
                             .filter { it.lower <= 60 && it.upper >= 60 }
                             .sortedWith(
-                                compareBy<Range<Int>> { if (it.lower == 60 && it.upper == 60) 0 else 1 }
-                                    .thenBy { it.upper - it.lower }
+                                compareBy<Range<Int>> {
+                                    if (it.lower == 60 && it.upper == 60) 0 else 1
+                                }.thenBy { it.upper - it.lower }
                             )
                             .firstOrNull()
                     }.getOrNull()
@@ -1782,14 +1797,26 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         candidates.add(VideoRecordingMode(size, 60, highSpeedRange, true))
                     }
                 }
-            }
         }
 
-        // Collapse different sensor output sizes that share the same visible preset.
+        // Samsung's picker presents one best stream per visible preset. Prefer
+        // the closest 16:9 size, then the largest dimensions; never expose
+        // multiple sensor sizes under the same UHD/FHD/HD label and frame rate.
+        val presetOrder = mapOf(
+            "UHD@60" to 0,
+            "UHD@30" to 1,
+            "FHD@60" to 2,
+            "FHD@30" to 3,
+            "HD@30" to 4
+        )
         availableVideoModes = candidates
+            .filter { mode ->
+                val key = mode.resolutionLabel() + "@" + mode.fps
+                key in presetOrder
+            }
             .groupBy { it.resolutionLabel() + "@" + it.fps }
-            .values
-            .map { group ->
+            .mapNotNull { (key, group) ->
+                if (key !in presetOrder) return@mapNotNull null
                 group.sortedWith(
                     compareBy<VideoRecordingMode> {
                         abs(
@@ -1802,11 +1829,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     }.thenBy { it.constrainedHighSpeed }
                 ).first()
             }
-            .sortedWith(
-                compareByDescending<VideoRecordingMode> {
-                    it.size.width.toLong() * it.size.height.toLong()
-                }.thenByDescending { it.fps }
-            )
+            .sortedBy { presetOrder[it.resolutionLabel() + "@" + it.fps] ?: Int.MAX_VALUE }
 
         val preferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
         val savedKey = preferences.getString(videoModePreferenceKey(), null)
@@ -1932,7 +1955,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 maxLines = 1
             }
             val frameRate = TextView(this).apply {
-                text = mode.fps.toString() + " FPS"
+                text = mode.fps.toString()
                 gravity = Gravity.CENTER
                 textSize = 11f
                 includeFontPadding = false
@@ -1941,12 +1964,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     android.graphics.Typeface.BOLD
                 )
                 setTextColor(Color.BLACK)
-                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setPadding(dp(5), dp(2), dp(5), dp(2))
                 background = rounded(
                     if (selected) 0xFFFFD429.toInt() else Color.WHITE,
                     5
                 )
-                minWidth = dp(48)
+                minWidth = dp(24)
             }
             val option = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1983,7 +2006,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             pickerScroll,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(92),
+                dp(65),
                 Gravity.TOP
             )
         )
