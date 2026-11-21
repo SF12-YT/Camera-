@@ -119,6 +119,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var galleryVideoBadge: TextView
 
     private lateinit var videoFormatButton: TextView
+    private var videoModePickerOverlay: FrameLayout? = null
     private lateinit var recordingTimerView: TextView
     private lateinit var shutterOuterView: View
     private lateinit var shutterInnerView: View
@@ -400,6 +401,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     @Deprecated("Deprecated in Android API; retained for back compatibility.")
     override fun onBackPressed() {
+        if (videoModePickerOverlay != null) {
+            closeVideoModePicker()
+            return
+        }
         if (settingsOverlay != null) {
             closeSettings()
             return
@@ -421,6 +426,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onPause() {
+        closeVideoModePicker()
         if (isVideoRecording || videoStartPending) {
             stopVideoRecording(restorePreview = false, showToast = false)
         }
@@ -1466,6 +1472,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         return buildString {
             appendLine("Video capability snapshot")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("Active video modes are queried only from the active camera ID; front-facing and unrelated rear IDs are not merged into this list.")
             appendLine("Active camera ID: ${cameraId ?: "unknown"}")
             appendLine("Active physical camera ID: ${activePhysicalCameraId ?: "none"}")
             appendLine("Active facing: ${if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) "rear" else "front"}")
@@ -1740,15 +1747,43 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 } else {
                     Long.MAX_VALUE
                 }
-                if (fps.toLong() <= maximumFps) {
+                // AE target FPS ranges are the camera's direct declaration of
+                // selectable frame rates. Some vendor HALs report a conservative
+                // MediaRecorder minimum frame duration (often 30 fps) even when
+                // their stock camera supports 60 fps. Keep 60 fps when AE advertises
+                // it; the duration remains visible in the capability report and
+                // the recording session itself is the final compatibility check.
+                if (fps.toLong() <= maximumFps || fps == 60) {
                     candidates.add(VideoRecordingMode(size, fps, range, false))
                 }
             }
         }
 
-        // Standard 60 FPS recording is detected from the regular AE FPS ranges
-        // above. Constrained high-speed configurations are a separate 120 FPS+
-        // recording path and must not be used to infer an ordinary 60 FPS mode.
+        // Some Camera2 implementations expose 60 fps only in the constrained
+        // high-speed configuration map. Add those modes only when the ordinary
+        // MediaRecorder path did not already expose the same visible preset.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && map != null) {
+            map.highSpeedVideoSizes?.toList().orEmpty().forEach { size ->
+                val label = VideoRecordingMode(size, 60, Range(60, 60), true).resolutionLabel()
+                val alreadyAvailable = candidates.any {
+                    it.fps == 60 && it.resolutionLabel() == label
+                }
+                if (!alreadyAvailable) {
+                    val highSpeedRange = runCatching {
+                        map.getHighSpeedVideoFpsRangesFor(size).toList()
+                            .filter { it.lower <= 60 && it.upper >= 60 }
+                            .sortedWith(
+                                compareBy<Range<Int>> { if (it.lower == 60 && it.upper == 60) 0 else 1 }
+                                    .thenBy { it.upper - it.lower }
+                            )
+                            .firstOrNull()
+                    }.getOrNull()
+                    if (highSpeedRange != null) {
+                        candidates.add(VideoRecordingMode(size, 60, highSpeedRange, true))
+                    }
+                }
+            }
+        }
 
         // Collapse different sensor output sizes that share the same visible preset.
         availableVideoModes = candidates
@@ -1802,6 +1837,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun updateVideoUi() {
         if (!::videoFormatButton.isInitialized) return
         val videoMode = activeMode == "Video"
+        if (!videoMode || isVideoRecording || videoStartPending) closeVideoModePicker()
         videoFormatButton.visibility = if (videoMode && !isVideoRecording) View.VISIBLE else View.GONE
         recordingTimerView.visibility = if (isVideoRecording) View.VISIBLE else View.GONE
         if (::timerCountdownView.isInitialized && videoMode) {
@@ -1845,22 +1881,135 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun showVideoModePicker() {
         if (availableVideoModes.isEmpty() || isVideoRecording || videoStartPending) return
-        val labels = availableVideoModes.map { it.displayName() }.toTypedArray()
-        val selectedIndex = availableVideoModes.indexOfFirst {
-            it.preferenceKey() == selectedVideoMode?.preferenceKey()
-        }.coerceAtLeast(0)
-        AlertDialog.Builder(this)
-            .setTitle("Video resolution and frame rate")
-            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
-                val selected = availableVideoModes.getOrNull(which) ?: return@setSingleChoiceItems
-                selectedVideoMode = selected
-                getSharedPreferences("camera_settings", MODE_PRIVATE)
-                    .edit().putString(videoModePreferenceKey(), selected.preferenceKey()).apply()
-                updateVideoFormatButton()
-                dialog.dismiss()
+        if (videoModePickerOverlay != null) {
+            closeVideoModePicker()
+            return
+        }
+
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            setOnClickListener { closeVideoModePicker() }
+        }
+        val pickerScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isClickable = true
+        }
+        val pickerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.BLACK)
+            isClickable = true
+        }
+
+        val useEqualSlots = availableVideoModes.size <= 5
+        val rowWidth = if (useEqualSlots) {
+            FrameLayout.LayoutParams.MATCH_PARENT
+        } else {
+            dp(76) * availableVideoModes.size
+        }
+        pickerScroll.addView(
+            pickerRow,
+            android.widget.FrameLayout.LayoutParams(
+                rowWidth,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        availableVideoModes.forEach { mode ->
+            val selected = mode.preferenceKey() == selectedVideoMode?.preferenceKey()
+            val resolution = TextView(this).apply {
+                text = mode.resolutionLabel()
+                gravity = Gravity.CENTER
+                textSize = 13f
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.NORMAL
+                )
+                setTextColor(if (selected) 0xFFFFD429.toInt() else Color.WHITE)
+                maxLines = 1
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            val frameRate = TextView(this).apply {
+                text = mode.fps.toString()
+                gravity = Gravity.CENTER
+                textSize = 14f
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.BOLD
+                )
+                setTextColor(Color.BLACK)
+                setPadding(dp(7), dp(1), dp(7), dp(1))
+                background = rounded(
+                    if (selected) 0xFFFFD429.toInt() else Color.WHITE,
+                    5
+                )
+                minWidth = dp(34)
+            }
+            val option = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(3), dp(7), dp(3), dp(7))
+                contentDescription = "Select " + mode.displayName()
+                isClickable = true
+                isFocusable = true
+                addView(
+                    resolution,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                )
+                addView(
+                    frameRate,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { topMargin = dp(2) }
+                )
+                setOnClickListener { selectVideoMode(mode) }
+            }
+            val optionParams = if (useEqualSlots) {
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+            } else {
+                LinearLayout.LayoutParams(dp(76), LinearLayout.LayoutParams.MATCH_PARENT)
+            }
+            pickerRow.addView(option, optionParams)
+        }
+
+        overlay.addView(
+            pickerScroll,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(92),
+                Gravity.TOP
+            )
+        )
+        videoModePickerOverlay = overlay
+        topPanel.visibility = View.GONE
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    private fun selectVideoMode(mode: VideoRecordingMode) {
+        selectedVideoMode = mode
+        getSharedPreferences("camera_settings", MODE_PRIVATE)
+            .edit().putString(videoModePreferenceKey(), mode.preferenceKey()).apply()
+        closeVideoModePicker()
+        updateVideoFormatButton()
+    }
+
+    private fun closeVideoModePicker() {
+        val overlay = videoModePickerOverlay ?: return
+        videoModePickerOverlay = null
+        if (::root.isInitialized) root.removeView(overlay)
+        if (::topPanel.isInitialized) topPanel.visibility = View.VISIBLE
     }
 
     private fun detectRearPortraitCameraSupport(
