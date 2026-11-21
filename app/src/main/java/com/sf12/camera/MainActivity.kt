@@ -1597,6 +1597,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
 
+    private fun videoModePreferenceKey(): String {
+        val cameraKey = activePhysicalCameraId ?: cameraId ?: lensFacing.toString()
+        return "video_recording_mode_" + cameraKey
+    }
+
     private fun refreshVideoRecordingModes() {
         val characteristics = if (activePhysicalCameraId != null) {
             ultraWideCameraCharacteristics ?: cameraCharacteristics
@@ -1644,7 +1649,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             )
 
         val preferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
-        val savedKey = preferences.getString("video_recording_mode", null)
+        val savedKey = preferences.getString(videoModePreferenceKey(), null)
         selectedVideoMode = availableVideoModes.firstOrNull {
             it.preferenceKey() == savedKey
         } ?: availableVideoModes.firstOrNull {
@@ -1654,7 +1659,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             ?: availableVideoModes.firstOrNull()
 
         selectedVideoMode?.let {
-            preferences.edit().putString("video_recording_mode", it.preferenceKey()).apply()
+            preferences.edit().putString(videoModePreferenceKey(), it.preferenceKey()).apply()
         }
         updateVideoFormatButton()
     }
@@ -1726,7 +1731,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 val selected = availableVideoModes.getOrNull(which) ?: return@setSingleChoiceItems
                 selectedVideoMode = selected
                 getSharedPreferences("camera_settings", MODE_PRIVATE)
-                    .edit().putString("video_recording_mode", selected.preferenceKey()).apply()
+                    .edit().putString(videoModePreferenceKey(), selected.preferenceKey()).apply()
                 updateVideoFormatButton()
                 dialog.dismiss()
             }
@@ -3838,6 +3843,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (targetPhysicalId == activePhysicalCameraId) return false
         activePhysicalCameraId = targetPhysicalId
+        refreshVideoRecordingModes()
+        updateVideoUi()
         if (cameraDevice != null) createImageReaderAndSession()
         return true
     }
