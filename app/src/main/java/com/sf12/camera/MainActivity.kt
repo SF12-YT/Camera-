@@ -1765,12 +1765,17 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 0L
             }
 
-            listOf(30, 60).forEach { fps ->
-                val range = bestRangeFor(fps) ?: return@forEach
-                // A zero/unknown duration is not evidence of 60-fps support.
-                // Require the per-size duration to sustain the requested rate.
-                val sizeSupportsRate = minimumFrameDuration > 0L &&
-                    maximumFpsForSize >= fps.toLong()
+            listOf(30, 60).forEach fpsLoop@{ fps ->
+                val range = bestRangeFor(fps) ?: return@fpsLoop
+                // A zero duration means Camera2 has no duration estimate, not
+                // that the advertised recorder size is unusable. Keep its
+                // standard 30-fps mode, but require positive per-size timing
+                // evidence before offering 60 fps.
+                val sizeSupportsRate = if (fps == 30) {
+                    minimumFrameDuration == 0L || maximumFpsForSize >= 30L
+                } else {
+                    minimumFrameDuration > 0L && maximumFpsForSize >= 60L
+                }
                 if (sizeSupportsRate) {
                     candidates.add(VideoRecordingMode(size, fps, range, false))
                 }
