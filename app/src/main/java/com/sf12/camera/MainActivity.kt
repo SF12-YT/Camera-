@@ -2837,23 +2837,24 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             descriptor = contentResolver.openFileDescriptor(insertedUri, "w")
                 ?: throw IllegalStateException("Unable to open video output")
 
-            recorder = MediaRecorder(this)
-            if (includeAudio) recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-            recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
-            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            val activeRecorder = MediaRecorder(this)
+            recorder = activeRecorder
+            if (includeAudio) activeRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            activeRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            activeRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             if (includeAudio) {
-                recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                recorder.setAudioEncodingBitRate(128_000)
-                recorder.setAudioSamplingRate(44_100)
+                activeRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                activeRecorder.setAudioEncodingBitRate(128_000)
+                activeRecorder.setAudioSamplingRate(44_100)
             }
-            recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            activeRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             val pixelCount = mode.size.width.toLong() * mode.size.height.toLong()
             val bitrate = (pixelCount * mode.fps * 0.12)
                 .toLong().coerceIn(8_000_000L, 80_000_000L)
-            recorder.setVideoEncodingBitRate(bitrate.toInt())
-            recorder.setVideoFrameRate(mode.fps)
-            recorder.setVideoSize(mode.size.width, mode.size.height)
-            recorder.setOutputFile(descriptor.fileDescriptor)
+            activeRecorder.setVideoEncodingBitRate(bitrate.toInt())
+            activeRecorder.setVideoFrameRate(mode.fps)
+            activeRecorder.setVideoSize(mode.size.width, mode.size.height)
+            activeRecorder.setOutputFile(descriptor.fileDescriptor)
             val sensorOrientation = cameraCharacteristics
                 ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             val displayRotation = when (windowManager.defaultDisplay.rotation) {
@@ -2867,12 +2868,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             } else {
                 (sensorOrientation - displayRotation + 360) % 360
             }
-            recorder.setOrientationHint(orientationHint)
-            recorder.prepare()
+            activeRecorder.setOrientationHint(orientationHint)
+            activeRecorder.prepare()
 
             videoRecordingUri = insertedUri
             videoOutputDescriptor = descriptor
-            videoRecorder = recorder
+            videoRecorder = activeRecorder
 
             runCatching { captureSession?.close() }
             captureSession = null
@@ -2892,7 +2893,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     try {
                         val request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(preview)
-                            addTarget(recorder.surface)
+                            addTarget(activeRecorder.surface)
                             set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                             set(CaptureRequest.CONTROL_AF_MODE, currentRecordingAfMode())
                             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
@@ -2910,7 +2911,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             applyZoom(this)
                         }
                         session.setRepeatingRequest(request.build(), null, cameraHandler)
-                        recorder.start()
+                        activeRecorder.start()
                         videoStartPending = false
                         isVideoRecording = true
                         videoRecordingStartedAt = SystemClock.elapsedRealtime()
