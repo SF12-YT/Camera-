@@ -2869,6 +2869,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             videoOutputDescriptor = descriptor
             videoRecorder = recorder
 
+            runCatching { captureSession?.close() }
+            captureSession = null
+
             val sessionCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     if (
@@ -3786,7 +3789,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun updateZoomCameraRoute(
         allowStandaloneSwitch: Boolean = true
     ): Boolean {
-        if (isVideoRecording || videoStartPending) return
+        if (isVideoRecording || videoStartPending) return false
 
         val mainCharacteristics = rearMainCameraCharacteristics ?: cameraCharacteristics
         val logicalRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -4777,8 +4780,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val device = cameraDevice ?: return null
         val surface = previewSurface ?: return null
         return try {
-            device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            val template = if (isVideoRecording) {
+                CameraDevice.TEMPLATE_RECORD
+            } else {
+                CameraDevice.TEMPLATE_PREVIEW
+            }
+            device.createCaptureRequest(template).apply {
                 addTarget(surface)
+                if (isVideoRecording) {
+                    addTarget(
+                        videoRecorder?.surface
+                            ?: throw IllegalStateException("Video recorder surface is unavailable")
+                    )
+                    selectedVideoMode?.let {
+                        set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it.fpsRange)
+                    }
+                    set(
+                        CaptureRequest.FLASH_MODE,
+                        if (
+                            flashMode == 1 &&
+                            lensFacing == CameraCharacteristics.LENS_FACING_BACK &&
+                            isFlashAvailable()
+                        ) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF
+                    )
+                }
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AF_MODE, currentAfMode())
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
@@ -5185,7 +5210,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (hasGalleryReadPermission() && ::galleryThumbnail.isInitialized) {
                 loadLatestCameraThumbnail()
             }
-        }
         } else if (requestCode == videoAudioPermissionRequestCode && videoAudioPermissionPending) {
             videoAudioPermissionPending = false
             val audioGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
