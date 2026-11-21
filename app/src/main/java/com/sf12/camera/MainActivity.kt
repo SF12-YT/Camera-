@@ -29,6 +29,7 @@ import android.hardware.camera2.params.SessionConfiguration
 import android.graphics.ImageFormat
 import android.media.ImageReader
 import android.media.MediaMetadataRetriever
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -37,6 +38,7 @@ import android.os.storage.StorageManager
 import android.os.Handler
 import android.os.SystemClock
 import android.os.HandlerThread
+import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Range
@@ -114,6 +116,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var galleryThumbnail: ImageView
     private lateinit var galleryPlaceholder: CameraIconButton
     private lateinit var galleryVideoBadge: TextView
+
+    private lateinit var videoFormatButton: TextView
+    private lateinit var recordingTimerView: TextView
+    private lateinit var shutterOuterView: View
+    private lateinit var shutterInnerView: View
     private lateinit var shutterButton: FrameLayout
     private lateinit var modeLabels: Map<String, TextView>
     private lateinit var scaleGestureDetector: ScaleGestureDetector
@@ -212,6 +219,28 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val filePath: String?,
         val orientation: Int
     )
+
+    private data class VideoRecordingMode(
+        val size: Size,
+        val fps: Int,
+        val fpsRange: Range<Int>
+    ) {
+        fun displayName(): String {
+            val width = maxOf(size.width, size.height)
+            val height = minOf(size.width, size.height)
+            val resolution = when {
+                width >= 3840 && height >= 2160 -> "UHD"
+                width >= 1920 && height >= 1080 -> "FHD"
+                width >= 1280 && height >= 720 -> "HD"
+                else -> width.toString() + "×" + height.toString()
+            }
+            return resolution + " " + fps + " FPS"
+        }
+
+        fun preferenceKey(): String {
+            return size.width.toString() + "x" + size.height.toString() + "@" + fps
+        }
+    }
     private data class PortraitCameraSupport(
         val available: Boolean,
         val route: String? = null,
@@ -235,6 +264,33 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private var activityResumed = false
     private var cameraOpenGeneration = 0L
     private var capturePending = false
+
+    @Volatile private var isVideoRecording = false
+    @Volatile private var videoStartPending = false
+    private var videoRecordingGeneration = 0L
+    private var videoRecorder: MediaRecorder? = null
+    private var videoOutputDescriptor: ParcelFileDescriptor? = null
+    private var videoRecordingUri: Uri? = null
+    private var videoRecordingStartedAt = 0L
+    private var videoAudioPermissionPending = false
+    private var availableVideoModes: List<VideoRecordingMode> = emptyList()
+    private var selectedVideoMode: VideoRecordingMode? = null
+    private val videoTimerRunnable = object : Runnable {
+        override fun run() {
+            if (!isVideoRecording || !::recordingTimerView.isInitialized) return
+            val elapsed = ((SystemClock.elapsedRealtime() - videoRecordingStartedAt) / 1000L)
+                .coerceAtLeast(0L)
+            val hours = elapsed / 3600L
+            val minutes = (elapsed % 3600L) / 60L
+            val seconds = elapsed % 60L
+            recordingTimerView.text = if (hours > 0L) {
+                String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
+            } else {
+                String.format(Locale.US, "%02d:%02d", minutes, seconds)
+            }
+            mainHandler.postDelayed(this, 1000L)
+        }
+    }
     private var timerDeadlineRealtimeMs = 0L
     private var flashFocusAssistInProgress = false
     private var flashFocusAssistGeneration = 0L
@@ -242,6 +298,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private val permissionRequestCode = 710
     private val galleryPermissionRequestCode = 711
+    private val videoAudioPermissionRequestCode = 712
     private val timerRunnable = object : Runnable {
         override fun run() {
             if (!capturePending) return
@@ -357,6 +414,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onPause() {
+        if (isVideoRecording || videoStartPending) {
+            stopVideoRecording(restorePreview = false, showToast = false)
+        }
         activityResumed = false
         focusLocked = false
         if (::focusIndicator.isInitialized) {
@@ -497,6 +557,57 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 topMargin = dp(68)
                 rightMargin = dp(16)
             }
+        )
+
+        videoFormatButton = TextView(this).apply {
+            text = "FHD 30 FPS"
+            gravity = Gravity.CENTER
+            textSize = 12f
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            setTextColor(Color.WHITE)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = rounded(0xCC171717.toInt(), 18, 0x66FFFFFF)
+            elevation = dp(5).toFloat()
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Video resolution and frame rate"
+            setOnClickListener { showVideoModePicker() }
+        }
+        root.addView(
+            videoFormatButton,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            ).apply { topMargin = dp(70) }
+        )
+
+        recordingTimerView = TextView(this).apply {
+            text = "00:00"
+            gravity = Gravity.CENTER
+            textSize = 14f
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            setTextColor(Color.WHITE)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = rounded(0xCC171717.toInt(), 18, 0x66FF5252.toInt())
+            elevation = dp(5).toFloat()
+            visibility = View.GONE
+            contentDescription = "Recording duration"
+        }
+        root.addView(
+            recordingTimerView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            ).apply { topMargin = dp(70) }
         )
 
         expandedOptionsRow = LinearLayout(this).apply {
@@ -731,10 +842,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             contentDescription = "Take photo"
             setOnClickListener { onShutterPressed() }
         }
-        val shutterInner = View(this).apply { background = oval(Color.WHITE) }
+        shutterOuterView = View(this).apply { background = oval(Color.WHITE) }
         shutterButton.addView(
-            shutterInner,
+            shutterOuterView,
             FrameLayout.LayoutParams(dp(58), dp(58), Gravity.CENTER)
+        )
+        shutterInnerView = View(this).apply {
+            background = oval(Color.RED)
+            visibility = View.GONE
+        }
+        shutterButton.addView(
+            shutterInnerView,
+            FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER)
         )
         shutterRow.addView(shutterButton, LinearLayout.LayoutParams(dp(82), dp(82)))
 
@@ -1412,6 +1531,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         }
 
+        refreshVideoRecordingModes()
+        updateVideoUi()
+
         val streamMap = cameraCharacteristics
             ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val maximumHighSpeedFps = streamMap?.highSpeedVideoFpsRanges
@@ -1472,6 +1594,144 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (activePrimaryMode !in primaryModes) activePrimaryMode = "More"
         saveCameraModeConfiguration()
         if (::modeRow.isInitialized) rebuildModeStrip()
+    }
+
+
+    private fun refreshVideoRecordingModes() {
+        val characteristics = if (activePhysicalCameraId != null) {
+            ultraWideCameraCharacteristics ?: cameraCharacteristics
+        } else {
+            cameraCharacteristics
+        }
+        val map = characteristics?.get(
+            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+        )
+        val outputSizes = map?.getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty()
+        val fpsRanges = characteristics
+            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.toList().orEmpty()
+        val candidates = mutableListOf<VideoRecordingMode>()
+
+        outputSizes.distinctBy { it.width to it.height }.forEach { size ->
+            listOf(30, 60).forEach fpsLoop@{ fps ->
+                val range = fpsRanges
+                    .filter { fps >= it.lower && fps <= it.upper }
+                    .sortedWith(
+                        compareBy<Range<Int>> { if (it.upper == fps) 0 else 1 }
+                            .thenBy { it.upper - it.lower }
+                    )
+                    .firstOrNull() ?: return@fpsLoop
+                val minimumFrameDuration = runCatching {
+                    map?.getOutputMinFrameDuration(MediaRecorder::class.java, size) ?: 0L
+                }.getOrDefault(0L)
+                val maximumFps = if (minimumFrameDuration > 0L) {
+                    1_000_000_000L / minimumFrameDuration
+                } else {
+                    Long.MAX_VALUE
+                }
+                if (fps.toLong() <= maximumFps) {
+                    candidates.add(VideoRecordingMode(size, fps, range))
+                }
+            }
+        }
+
+        availableVideoModes = candidates
+            .distinctBy { it.preferenceKey() }
+            .sortedWith(
+                compareByDescending<VideoRecordingMode> {
+                    it.size.width.toLong() * it.size.height.toLong()
+                }.thenByDescending { it.fps }
+            )
+
+        val preferences = getSharedPreferences("camera_settings", MODE_PRIVATE)
+        val savedKey = preferences.getString("video_recording_mode", null)
+        selectedVideoMode = availableVideoModes.firstOrNull {
+            it.preferenceKey() == savedKey
+        } ?: availableVideoModes.firstOrNull {
+            maxOf(it.size.width, it.size.height) >= 1920 &&
+                minOf(it.size.width, it.size.height) >= 1080 && it.fps == 30
+        } ?: availableVideoModes.firstOrNull { it.fps == 30 }
+            ?: availableVideoModes.firstOrNull()
+
+        selectedVideoMode?.let {
+            preferences.edit().putString("video_recording_mode", it.preferenceKey()).apply()
+        }
+        updateVideoFormatButton()
+    }
+
+    private fun updateVideoFormatButton() {
+        if (!::videoFormatButton.isInitialized) return
+        val selected = selectedVideoMode
+        videoFormatButton.text = selected?.displayName() ?: "Video unavailable"
+        videoFormatButton.isEnabled = selected != null && !isVideoRecording && !videoStartPending
+        videoFormatButton.alpha = if (videoFormatButton.isEnabled) 1f else 0.55f
+        videoFormatButton.contentDescription = selected?.let {
+            "Video setting " + it.displayName() + ". Tap to change."
+        } ?: "No supported video recording modes"
+    }
+
+    private fun updateVideoUi() {
+        if (!::videoFormatButton.isInitialized) return
+        val videoMode = activeMode == "Video"
+        videoFormatButton.visibility = if (videoMode && !isVideoRecording) View.VISIBLE else View.GONE
+        recordingTimerView.visibility = if (isVideoRecording) View.VISIBLE else View.GONE
+        if (::timerCountdownView.isInitialized && videoMode) {
+            timerCountdownView.visibility = View.GONE
+        }
+        if (::timerButton.isInitialized) timerButton.visibility = if (videoMode) View.GONE else View.VISIBLE
+        if (::aspectButton.isInitialized) aspectButton.visibility = if (videoMode) View.GONE else View.VISIBLE
+        if (::motionPhotoButton.isInitialized) motionPhotoButton.visibility =
+            if (videoMode) View.GONE else View.VISIBLE
+        if (::shutterButton.isInitialized) updateShutterButton()
+        updateVideoFormatButton()
+    }
+
+    private fun updateShutterButton() {
+        if (!::shutterInnerView.isInitialized || !::shutterOuterView.isInitialized) return
+        val videoMode = activeMode == "Video"
+        shutterButton.contentDescription = when {
+            videoMode && isVideoRecording -> "Stop video recording"
+            videoMode -> "Start video recording"
+            else -> "Take photo"
+        }
+        if (!videoMode) {
+            shutterOuterView.background = oval(Color.WHITE)
+            shutterInnerView.visibility = View.GONE
+            return
+        }
+        shutterOuterView.background = ovalStroke(Color.WHITE, dp(3))
+        shutterInnerView.visibility = View.VISIBLE
+        val innerSize = if (isVideoRecording) dp(22) else dp(30)
+        shutterInnerView.layoutParams = FrameLayout.LayoutParams(
+            innerSize,
+            innerSize,
+            Gravity.CENTER
+        )
+        shutterInnerView.background = if (isVideoRecording) {
+            rounded(Color.RED, 5)
+        } else {
+            oval(Color.RED)
+        }
+    }
+
+    private fun showVideoModePicker() {
+        if (availableVideoModes.isEmpty() || isVideoRecording || videoStartPending) return
+        val labels = availableVideoModes.map { it.displayName() }.toTypedArray()
+        val selectedIndex = availableVideoModes.indexOfFirst {
+            it.preferenceKey() == selectedVideoMode?.preferenceKey()
+        }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Video resolution and frame rate")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                val selected = availableVideoModes.getOrNull(which) ?: return@setSingleChoiceItems
+                selectedVideoMode = selected
+                getSharedPreferences("camera_settings", MODE_PRIVATE)
+                    .edit().putString("video_recording_mode", selected.preferenceKey()).apply()
+                updateVideoFormatButton()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun detectRearPortraitCameraSupport(
@@ -1605,6 +1865,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun selectMode(mode: String) {
+        if (isVideoRecording || videoStartPending) {
+            Toast.makeText(this, "Stop recording before changing camera modes.", Toast.LENGTH_SHORT).show()
+            return
+        }
         if (mode == "More") {
             activePrimaryMode = "More"
             updatePrimaryModeLabels()
@@ -1614,15 +1878,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         if (mode !in primaryModes) return
         if (moreModesOverlay != null) closeMoreModes()
 
+        if (mode == "Video" && availableVideoModes.isEmpty()) {
+            Toast.makeText(this, "Video recording is not supported by this camera.", Toast.LENGTH_LONG).show()
+            return
+        }
         activePrimaryMode = mode
         activeMode = mode
         updatePrimaryModeLabels()
+        updateVideoUi()
         if (mode == "Pro") {
             Toast.makeText(this, "Pro mode is not implemented yet.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (mode != "Photo" && mode != "Portrait") {
-            Toast.makeText(this, "$mode mode is not implemented yet.", Toast.LENGTH_SHORT).show()
+        } else if (mode != "Photo" && mode != "Portrait" && mode != "Video") {
+            Toast.makeText(this, mode + " mode is not implemented yet.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2479,7 +2746,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun onShutterPressed() {
-        if (activeTab != "Basic" || activeMode !in listOf("Photo", "Portrait")) return
+        if (activeTab != "Basic") return
+        if (activeMode == "Video") {
+            if (isVideoRecording) {
+                stopVideoRecording()
+            } else if (!videoStartPending) {
+                startVideoRecording()
+            }
+            return
+        }
+        if (activeMode !in listOf("Photo", "Portrait")) return
         if (capturePending || flashFocusAssistInProgress) return
         val delay = timerSeconds
         if (delay > 0) {
@@ -2491,6 +2767,300 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             captureStillPhoto()
         }
     }
+
+
+    private fun startVideoRecording() {
+        if (selectedVideoMode == null || availableVideoModes.isEmpty()) {
+            Toast.makeText(this, "No supported video recording mode is available.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (cameraDevice == null || previewSurface == null || captureSession == null) {
+            Toast.makeText(this, "Camera is still preparing. Try again in a moment.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            videoAudioPermissionPending = true
+            requestPermissions(
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                videoAudioPermissionRequestCode
+            )
+            return
+        }
+        prepareVideoRecording(includeAudio = true)
+    }
+
+    private fun prepareVideoRecording(includeAudio: Boolean) {
+        val device = cameraDevice ?: return
+        val preview = previewSurface ?: return
+        val mode = selectedVideoMode ?: return
+        val storage = selectedCameraStorageLocation()
+        if (storage == null) {
+            Toast.makeText(
+                this,
+                "The selected storage is unavailable. Choose an available storage location in Settings.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val generation = ++videoRecordingGeneration
+        videoStartPending = true
+        updateVideoUi()
+        updateVideoFormatButton()
+
+        var insertedUri: Uri? = null
+        var descriptor: ParcelFileDescriptor? = null
+        var recorder: MediaRecorder? = null
+        try {
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Video.Media.getContentUri(storage.volumeName)
+            } else {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            }
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, "Camera_" + timestamp + ".mp4")
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/Camera")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+            }
+            insertedUri = contentResolver.insert(collection, values)
+                ?: throw IllegalStateException("Unable to create a video entry")
+            descriptor = contentResolver.openFileDescriptor(insertedUri, "w")
+                ?: throw IllegalStateException("Unable to open video output")
+
+            recorder = MediaRecorder(this)
+            if (includeAudio) recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            if (includeAudio) {
+                recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                recorder.setAudioEncodingBitRate(128_000)
+                recorder.setAudioSamplingRate(44_100)
+            }
+            recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            val pixelCount = mode.size.width.toLong() * mode.size.height.toLong()
+            val bitrate = (pixelCount * mode.fps * 0.12)
+                .toLong().coerceIn(8_000_000L, 80_000_000L)
+            recorder.setVideoEncodingBitRate(bitrate.toInt())
+            recorder.setVideoFrameRate(mode.fps)
+            recorder.setVideoSize(mode.size.width, mode.size.height)
+            recorder.setOutputFile(descriptor.fileDescriptor)
+            val sensorOrientation = cameraCharacteristics
+                ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            val displayRotation = when (windowManager.defaultDisplay.rotation) {
+                Surface.ROTATION_90 -> 90
+                Surface.ROTATION_180 -> 180
+                Surface.ROTATION_270 -> 270
+                else -> 0
+            }
+            val orientationHint = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                (sensorOrientation + displayRotation) % 360
+            } else {
+                (sensorOrientation - displayRotation + 360) % 360
+            }
+            recorder.setOrientationHint(orientationHint)
+            recorder.prepare()
+
+            videoRecordingUri = insertedUri
+            videoOutputDescriptor = descriptor
+            videoRecorder = recorder
+
+            val sessionCallback = object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    if (
+                        generation != videoRecordingGeneration ||
+                        !videoStartPending ||
+                        cameraDevice !== device ||
+                        !activityResumed
+                    ) {
+                        session.close()
+                        return
+                    }
+                    captureSession = session
+                    try {
+                        val request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                            addTarget(preview)
+                            addTarget(recorder.surface)
+                            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                            set(CaptureRequest.CONTROL_AF_MODE, currentAfMode())
+                            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                            set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mode.fpsRange)
+                            set(
+                                CaptureRequest.FLASH_MODE,
+                                if (
+                                    flashMode == 1 &&
+                                    lensFacing == CameraCharacteristics.LENS_FACING_BACK &&
+                                    isFlashAvailable()
+                                ) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF
+                            )
+                            applyFilter(this)
+                            applyZoom(this)
+                        }
+                        session.setRepeatingRequest(request.build(), null, cameraHandler)
+                        recorder.start()
+                        videoStartPending = false
+                        isVideoRecording = true
+                        videoRecordingStartedAt = SystemClock.elapsedRealtime()
+                        runOnUiThread {
+                            updateVideoUi()
+                            mainHandler.removeCallbacks(videoTimerRunnable)
+                            videoTimerRunnable.run()
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Recording " + mode.displayName(),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    } catch (error: Throwable) {
+                        runOnUiThread {
+                            abortVideoRecordingStart(
+                                "Couldn't start video recording: " +
+                                    (error.message ?: error.javaClass.simpleName)
+                            )
+                        }
+                    }
+                }
+
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    session.close()
+                    runOnUiThread {
+                        if (generation == videoRecordingGeneration) {
+                            abortVideoRecordingStart(
+                                "This camera couldn't start recording at " + mode.displayName() + "."
+                            )
+                        }
+                    }
+                }
+            }
+
+            val physicalId = activePhysicalCameraId
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
+                val outputConfigurations = listOf(
+                    OutputConfiguration(preview),
+                    OutputConfiguration(recorder.surface)
+                ).onEach { it.setPhysicalCameraId(physicalId) }
+                val callbackExecutor = Executor { command ->
+                    val handler = cameraHandler
+                    if (handler != null) handler.post(command) else mainHandler.post(command)
+                }
+                device.createCaptureSession(
+                    SessionConfiguration(
+                        SessionConfiguration.SESSION_REGULAR,
+                        outputConfigurations,
+                        callbackExecutor,
+                        sessionCallback
+                    )
+                )
+            } else {
+                device.createCaptureSession(
+                    listOf(preview, recorder.surface),
+                    sessionCallback,
+                    cameraHandler
+                )
+            }
+        } catch (error: Throwable) {
+            recorder?.release()
+            descriptor?.close()
+            insertedUri?.let { contentResolver.delete(it, null, null) }
+            videoRecorder = null
+            videoOutputDescriptor = null
+            videoRecordingUri = null
+            videoStartPending = false
+            updateVideoUi()
+            Toast.makeText(
+                this,
+                "Couldn't prepare video recording: " +
+                    (error.message ?: error.javaClass.simpleName),
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun abortVideoRecordingStart(message: String) {
+        videoRecordingGeneration++
+        videoStartPending = false
+        isVideoRecording = false
+        mainHandler.removeCallbacks(videoTimerRunnable)
+        runCatching { captureSession?.close() }
+        captureSession = null
+        runCatching { videoRecorder?.release() }
+        videoRecorder = null
+        runCatching { videoOutputDescriptor?.close() }
+        videoOutputDescriptor = null
+        videoRecordingUri?.let { runCatching { contentResolver.delete(it, null, null) } }
+        videoRecordingUri = null
+        updateVideoUi()
+        if (activityResumed && cameraDevice != null && previewView.isAvailable) {
+            createImageReaderAndSession()
+        }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun stopVideoRecording(
+        restorePreview: Boolean = true,
+        showToast: Boolean = true
+    ) {
+        val wasRecording = isVideoRecording
+        val wasPending = videoStartPending
+        if (!wasRecording && !wasPending) return
+        videoRecordingGeneration++
+        isVideoRecording = false
+        videoStartPending = false
+        mainHandler.removeCallbacks(videoTimerRunnable)
+        val recorder = videoRecorder
+        var recordingSaved = false
+        if (wasRecording) {
+            try {
+                recorder?.stop()
+                recordingSaved = true
+            } catch (_: RuntimeException) {
+                recordingSaved = false
+            }
+        }
+        runCatching { recorder?.release() }
+        videoRecorder = null
+        runCatching { videoOutputDescriptor?.close() }
+        videoOutputDescriptor = null
+        runCatching { captureSession?.close() }
+        captureSession = null
+
+        val uri = videoRecordingUri
+        videoRecordingUri = null
+        if (recordingSaved && uri != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching {
+                    contentResolver.update(
+                        uri,
+                        ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        },
+                        null,
+                        null
+                    )
+                }
+            }
+            if (showToast) {
+                Toast.makeText(this, "Video saved to DCIM/Camera.", Toast.LENGTH_SHORT).show()
+            }
+            loadLatestCameraThumbnail()
+        } else {
+            uri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            if (showToast && wasRecording) {
+                Toast.makeText(this, "The video could not be finalised and was discarded.", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        updateVideoUi()
+        if (restorePreview && activityResumed && cameraDevice != null && previewView.isAvailable) {
+            createImageReaderAndSession()
+        }
+    }
+
 
     private fun hideTimerCountdown() {
         if (::timerCountdownView.isInitialized) {
@@ -3216,6 +3786,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun updateZoomCameraRoute(
         allowStandaloneSwitch: Boolean = true
     ): Boolean {
+        if (isVideoRecording || videoStartPending) return
+
         val mainCharacteristics = rearMainCameraCharacteristics ?: cameraCharacteristics
         val logicalRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             mainCharacteristics?.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
@@ -3739,6 +4311,10 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun switchCamera() {
+        if (isVideoRecording || videoStartPending) {
+            Toast.makeText(this, "Stop recording before switching cameras.", Toast.LENGTH_SHORT).show()
+            return
+        }
         val targetFacing = if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
             CameraCharacteristics.LENS_FACING_FRONT
         } else {
@@ -4609,6 +5185,19 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             if (hasGalleryReadPermission() && ::galleryThumbnail.isInitialized) {
                 loadLatestCameraThumbnail()
             }
+        }
+        } else if (requestCode == videoAudioPermissionRequestCode && videoAudioPermissionPending) {
+            videoAudioPermissionPending = false
+            val audioGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!audioGranted) {
+                Toast.makeText(
+                    this,
+                    "Microphone access wasn't granted; recording video without audio.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            prepareVideoRecording(includeAudio = audioGranted)
         }
     }
 
