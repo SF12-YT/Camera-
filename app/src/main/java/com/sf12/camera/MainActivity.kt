@@ -19,6 +19,7 @@ import android.graphics.SurfaceTexture
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
@@ -223,22 +224,28 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private data class VideoRecordingMode(
         val size: Size,
         val fps: Int,
-        val fpsRange: Range<Int>
+        val fpsRange: Range<Int>,
+        val constrainedHighSpeed: Boolean = false
     ) {
-        fun displayName(): String {
+        fun resolutionLabel(): String {
             val width = maxOf(size.width, size.height)
             val height = minOf(size.width, size.height)
-            val resolution = when {
-                width >= 3840 && height >= 2160 -> "UHD"
-                width >= 1920 && height >= 1080 -> "FHD"
-                width >= 1280 && height >= 720 -> "HD"
+            val ratio = width.toFloat() / height.toFloat()
+            return when {
+                width >= 3840 && height >= 2160 && ratio > 1.7f -> "UHD"
+                width >= 2560 && height >= 1440 && ratio > 1.7f -> "QHD"
+                width >= 1920 && height >= 1080 && ratio > 1.7f -> "FHD"
+                width >= 1280 && height >= 720 && ratio > 1.7f -> "HD"
                 else -> width.toString() + "×" + height.toString()
             }
-            return resolution + " " + fps + " FPS"
         }
 
+        fun displayName(): String = resolutionLabel() + " " + fps + " FPS"
+        fun compactName(): String = resolutionLabel() + " " + fps
+
         fun preferenceKey(): String {
-            return size.width.toString() + "x" + size.height.toString() + "@" + fps
+            return size.width.toString() + "x" + size.height.toString() +
+                "@" + fps + if (constrainedHighSpeed) "@hs" else "@normal"
         }
     }
     private data class PortraitCameraSupport(
@@ -508,10 +515,29 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         aspectButton = iconControl("ratio", "Photo size") { showAspectRatioPicker() }
         motionPhotoButton = iconControl("motion", "Motion Photo") { showMotionPhotoInfo() }
         filterButton = iconControl("filters", "Filters") { showFilterPicker() }
+        videoFormatButton = TextView(this).apply {
+            text = "FHD 30"
+            gravity = Gravity.CENTER
+            textSize = 12f
+            maxLines = 1
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.NORMAL
+            )
+            setTextColor(Color.WHITE)
+            setPadding(dp(3), dp(8), dp(3), dp(8))
+            background = rounded(0xCC171717.toInt(), 18, 0x66FFFFFF)
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Video resolution and frame rate"
+            setOnClickListener { showVideoModePicker() }
+        }
 
         listOf(
             settingsButton,
             flashButton,
+            videoFormatButton,
             timerButton,
             aspectButton,
             motionPhotoButton,
@@ -559,32 +585,6 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
         )
 
-        videoFormatButton = TextView(this).apply {
-            text = "FHD 30 FPS"
-            gravity = Gravity.CENTER
-            textSize = 12f
-            typeface = android.graphics.Typeface.create(
-                "sans-serif-medium",
-                android.graphics.Typeface.NORMAL
-            )
-            setTextColor(Color.WHITE)
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            background = rounded(0xCC171717.toInt(), 18, 0x66FFFFFF)
-            elevation = dp(5).toFloat()
-            visibility = View.GONE
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Video resolution and frame rate"
-            setOnClickListener { showVideoModePicker() }
-        }
-        root.addView(
-            videoFormatButton,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            ).apply { topMargin = dp(70) }
-        )
 
         recordingTimerView = TextView(this).apply {
             text = "00:00"
@@ -1635,13 +1635,45 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     Long.MAX_VALUE
                 }
                 if (fps.toLong() <= maximumFps) {
-                    candidates.add(VideoRecordingMode(size, fps, range))
+                    candidates.add(VideoRecordingMode(size, fps, range, false))
                 }
             }
         }
 
+        // Many devices expose 60 FPS only through constrained-high-speed stream
+        // configurations rather than the regular AE target FPS list.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && activePhysicalCameraId == null) {
+            map?.highSpeedVideoSizes?.toList().orEmpty()
+                .distinctBy { it.width to it.height }
+                .forEach { size ->
+                    val ranges = runCatching {
+                        map.getHighSpeedVideoFpsRangesFor(size).toList()
+                    }.getOrDefault(emptyList())
+                    ranges.forEach { range ->
+                        if (range.lower <= 60 && range.upper >= 60) {
+                            candidates.add(VideoRecordingMode(size, 60, range, true))
+                        }
+                    }
+                }
+        }
+
+        // Collapse different sensor output sizes that share the same visible preset.
         availableVideoModes = candidates
-            .distinctBy { it.preferenceKey() }
+            .groupBy { it.resolutionLabel() + "@" + it.fps }
+            .values
+            .map { group ->
+                group.sortedWith(
+                    compareBy<VideoRecordingMode> {
+                        abs(
+                            maxOf(it.size.width, it.size.height).toFloat() /
+                                minOf(it.size.width, it.size.height).toFloat() -
+                                (16f / 9f)
+                        )
+                    }.thenByDescending {
+                        it.size.width.toLong() * it.size.height.toLong()
+                    }.thenByDescending { it.constrainedHighSpeed }
+                ).first()
+            }
             .sortedWith(
                 compareByDescending<VideoRecordingMode> {
                     it.size.width.toLong() * it.size.height.toLong()
@@ -1653,8 +1685,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         selectedVideoMode = availableVideoModes.firstOrNull {
             it.preferenceKey() == savedKey
         } ?: availableVideoModes.firstOrNull {
-            maxOf(it.size.width, it.size.height) >= 1920 &&
-                minOf(it.size.width, it.size.height) >= 1080 && it.fps == 30
+            it.resolutionLabel() == "FHD" && it.fps == 30
         } ?: availableVideoModes.firstOrNull { it.fps == 30 }
             ?: availableVideoModes.firstOrNull()
 
@@ -1667,7 +1698,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun updateVideoFormatButton() {
         if (!::videoFormatButton.isInitialized) return
         val selected = selectedVideoMode
-        videoFormatButton.text = selected?.displayName() ?: "Video unavailable"
+        videoFormatButton.text = selected?.compactName() ?: "Unavailable"
         videoFormatButton.isEnabled = selected != null && !isVideoRecording && !videoStartPending
         videoFormatButton.alpha = if (videoFormatButton.isEnabled) 1f else 0.55f
         videoFormatButton.contentDescription = selected?.let {
@@ -2794,10 +2825,46 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         prepareVideoRecording(includeAudio = true)
     }
 
+    private fun chooseHighSpeedPreviewSize(mode: VideoRecordingMode): Size? {
+        val characteristics = cameraCharacteristics ?: return null
+        val map = characteristics.get(
+            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+        ) ?: return null
+        val desiredRatio = maxOf(mode.size.width, mode.size.height).toFloat() /
+            minOf(mode.size.width, mode.size.height).toFloat()
+        return map.getOutputSizes(SurfaceTexture::class.java)
+            ?.filter { size ->
+                size.width <= mode.size.width &&
+                    size.height <= mode.size.height &&
+                    abs(size.width.toFloat() / size.height.toFloat() - desiredRatio) < 0.03f
+            }
+            ?.maxByOrNull { it.width.toLong() * it.height.toLong() }
+            ?: map.getOutputSizes(SurfaceTexture::class.java)
+                ?.minByOrNull {
+                    abs(it.width.toFloat() / it.height.toFloat() - desiredRatio)
+                }
+    }
+
     private fun prepareVideoRecording(includeAudio: Boolean) {
         val device = cameraDevice ?: return
         val preview = previewSurface ?: return
         val mode = selectedVideoMode ?: return
+        if (mode.constrainedHighSpeed) {
+            val compatiblePreviewSize = chooseHighSpeedPreviewSize(mode)
+            if (compatiblePreviewSize == null) {
+                Toast.makeText(
+                    this,
+                    "No compatible preview stream is available for high-speed recording.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+            previewView.surfaceTexture?.setDefaultBufferSize(
+                compatiblePreviewSize.width,
+                compatiblePreviewSize.height
+            )
+            configurePreviewTransform(previewView.width, previewView.height)
+        }
         val storage = selectedCameraStorageLocation()
         if (storage == null) {
             Toast.makeText(
@@ -2917,7 +2984,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                             applyFilter(this)
                             applyZoom(this)
                         }
-                        session.setRepeatingRequest(request.build(), null, cameraHandler)
+                        if (mode.constrainedHighSpeed) {
+                            val highSpeedSession = session as? CameraConstrainedHighSpeedCaptureSession
+                                ?: throw IllegalStateException("Camera did not create a constrained high-speed session.")
+                            val highSpeedRequests = highSpeedSession.createHighSpeedRequestList(
+                                request.build()
+                            )
+                            highSpeedSession.setRepeatingBurst(highSpeedRequests, null, cameraHandler)
+                        } else {
+                            session.setRepeatingRequest(request.build(), null, cameraHandler)
+                        }
                         activeRecorder.start()
                         videoStartPending = false
                         isVideoRecording = true
@@ -2955,7 +3031,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             }
 
             val physicalId = activePhysicalCameraId
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
+            if (mode.constrainedHighSpeed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                device.createConstrainedHighSpeedCaptureSession(
+                    listOf(preview, activeRecorder.surface),
+                    sessionCallback,
+                    cameraHandler
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
                 val outputConfigurations = listOf(
                     OutputConfiguration(preview),
                     OutputConfiguration(recorder.surface)
@@ -4871,7 +4953,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val session = captureSession ?: return
         val request = createPreviewRequest(CaptureRequest.CONTROL_AF_TRIGGER_IDLE) ?: return
         try {
-            session.setRepeatingRequest(request.build(), null, cameraHandler)
+            val builtRequest = request.build()
+            if (isVideoRecording && selectedVideoMode?.constrainedHighSpeed == true) {
+                val highSpeedSession = session as? CameraConstrainedHighSpeedCaptureSession
+                    ?: return
+                highSpeedSession.setRepeatingBurst(
+                    highSpeedSession.createHighSpeedRequestList(builtRequest),
+                    null,
+                    cameraHandler
+                )
+            } else {
+                session.setRepeatingRequest(builtRequest, null, cameraHandler)
+            }
         } catch (e: CameraAccessException) {
             runOnUiThread {
                 Toast.makeText(this, "Preview error: ${e.reason}", Toast.LENGTH_SHORT).show()
@@ -4935,6 +5028,8 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         addPortraitSubject: Boolean = false,
         lockFocus: Boolean = false
     ) {
+        if (isVideoRecording && selectedVideoMode?.constrainedHighSpeed == true) return
+
         val characteristics = cameraCharacteristics ?: return
         val activeLensCharacteristics = if (activePhysicalCameraId != null) {
             ultraWideCameraCharacteristics ?: characteristics
