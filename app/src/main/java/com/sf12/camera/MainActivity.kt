@@ -2837,7 +2837,12 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             descriptor = contentResolver.openFileDescriptor(insertedUri, "w")
                 ?: throw IllegalStateException("Unable to open video output")
 
-            val activeRecorder = MediaRecorder(this)
+            @Suppress("DEPRECATION")
+            val activeRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(this)
+            } else {
+                MediaRecorder()
+            }
             recorder = activeRecorder
             if (includeAudio) activeRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             activeRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
